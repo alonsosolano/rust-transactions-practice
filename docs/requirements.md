@@ -75,7 +75,7 @@ Each client has exactly one account, created by the first `deposit` or `withdraw
 Invariants that must hold after every operation:
 
 - `total = available + held`
-- `locked` becomes `true` after a chargeback and never reverts.
+- `locked` becomes `true` after a chargeback and never reverts. What a locked account still allows is set by [ADR-0008](decisions/0008-locked-account-policy.md).
 - `held` equals the sum of the amounts of the deposits currently under dispute.
 - `available` and `total` may be negative: a dispute or chargeback on funds that were already withdrawn leaves the debt visible ([ADR-0006](decisions/0006-dispute-lifecycle.md)).
 - No balance ever overflows silently. Balances are wide enough that valid input cannot overflow them, and every change is still checked ([ADR-0007](decisions/0007-money-representation.md)).
@@ -103,7 +103,7 @@ These are treated as upstream errors and skipped without failing the run. "Skipp
 - `dispute`, `resolve`, or `chargeback` whose `client` differs from the client that owns the `tx`.
 - `dispute` on a `tx` that is already under dispute or already charged back. A dispute on a resolved `tx` is not ignored; it opens a new cycle.
 - `resolve` or `chargeback` whose `tx` is not currently under dispute.
-- `withdrawal` on a locked account (rejected; balances unchanged). Deposits on a locked account are still accepted, so the client can repay a debt.
+- `withdrawal` on a locked account (rejected; balances unchanged), whatever the balance. The lock is checked before the funds check, so the reason is always "account locked" ([ADR-0008](decisions/0008-locked-account-policy.md) L3, L4). Deposits on a locked account are still accepted, so the client can repay a debt, and `dispute`, `resolve`, and `chargeback` behave as on an unlocked account (L2, L5).
 - Any row whose effect would overflow a balance ([ADR-0007](decisions/0007-money-representation.md) M7). Unreachable for valid input; kept as defense in depth.
 
 Only a `deposit` or `withdrawal` row creates a client account, including a rejected withdrawal. Ignored rows never do.
@@ -132,7 +132,7 @@ This section is a living catalog. It will grow with more attack scenarios and in
 
 ### Attack scenarios
 
-The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dispute-lifecycle.md) and M1 to M8 of [ADR-0007](decisions/0007-money-representation.md). Rows are listed in input order; `c1`/`c2` are client IDs. Results are `available / held / total / locked`.
+The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dispute-lifecycle.md), M1 to M8 of [ADR-0007](decisions/0007-money-representation.md), and L1 to L7 of [ADR-0008](decisions/0008-locked-account-policy.md). Rows are listed in input order; `c1`/`c2` are client IDs. Results are `available / held / total / locked`.
 
 | ID | Rule | Scenario (input rows) | Expected behavior |
 |----|------|-----------------------|-------------------|
@@ -158,6 +158,9 @@ The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dis
 | A20 | M5, M6 | `c1` deposit tx1 0; `c2` withdrawal tx2 0.0000 | Both rows are invalid. No accounts; the output has only the header. |
 | A21 | M2, M5 | `c1` deposit tx1 1844674407370955.1615; `c1` deposit tx2 1844674407370955.1615; `c1` deposit tx3 1844674407370955.1616 | tx1 and tx2 are accepted; their sum does not overflow the balance. tx3 is above the range and invalid. `3689348814741910.3230 / 0 / 3689348814741910.3230 / false`. |
 | A22 | M3 | `c1` deposits with amounts `.5`, `5.`, `+5`, `1e3`, `1_000`, and `" 2.5 "` (tx1 to tx6) | Only tx6 is accepted, after trimming the whitespace. `2.5 / 0 / 2.5 / false`. |
+| A23 | L5, R2 | `c1` deposit tx1 100; `c1` deposit tx2 100; `c1` deposit tx3 100; `c1` withdrawal tx4 300; `c1` dispute tx1; `c1` dispute tx2; `c1` dispute tx3; `c1` chargeback tx1; `c1` chargeback tx2; `c1` chargeback tx3 | Several disputed deposits: the first chargeback locks (`-300 / 200 / -100 / true`) and the later ones still apply, so the full debt shows. `-300 / 0 / -300 / true`. |
+| A24 | L1, L2, L5 | `c1` deposit tx1 10; `c1` dispute tx1; `c1` chargeback tx1; `c1` deposit tx2 50; `c1` dispute tx2; `c1` chargeback tx2 | Locked at `0 / 0 / 0 / true`. The deposit after the lock is applied (`50 / 0 / 50 / true`) and stays disputable (`0 / 50 / 50 / true`). Its chargeback returns the account to `0 / 0 / 0 / true`; the lock stays. |
+| A25 | L3, L4, L7, R7 | `c1` deposit tx1 10; `c1` deposit tx2 5; `c1` dispute tx1; `c1` chargeback tx1; `c1` withdrawal tx3 100; `c1` withdrawal tx4 1; `c1` dispute tx3 | Locked at `5 / 0 / 5 / true`. Both withdrawals are rejected with the reason "account locked", including tx3, which also lacks funds. The dispute on tx3 is ignored because a rejected withdrawal is never stored. `5 / 0 / 5 / true`. |
 
 ### Invariants
 
@@ -170,6 +173,8 @@ The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dis
 | I5 | R1 | Only deposits ever reach `Disputed`, `Resolved`, or `ChargedBack` |
 | I6 | M2, M7 | No balance ever overflows silently: every change to `available`, `held`, or `total` is checked, and a row whose effect would overflow leaves every account unchanged |
 | I7 | M1, M4, M5 | Every stored amount is strictly positive and equals exactly the value in the input; no amount is ever rounded or truncated |
+| I8 | L3 | No withdrawal is ever applied to an account whose `locked` is `true` |
+| I9 | L2, L5 | A `deposit`, `dispute`, `resolve`, or `chargeback` row has the same effect on balances and transaction states whether or not the account is locked |
 
 ## 7. Given assumptions
 
