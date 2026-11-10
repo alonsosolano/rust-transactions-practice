@@ -55,18 +55,43 @@ Ordering:
 
 ## 3. Output
 
-CSV with the columns `client, available, held, total, locked`, one row per client seen in the input.
+CSV with the columns `client, available, held, total, locked`. The exact format follows [ADR-0009](decisions/0009-output-format.md):
 
-- Amounts are printed with 4 fractional digits of precision. Formatting uses integer arithmetic only and keeps the sign of values between `-1` and `0` ([ADR-0007](decisions/0007-money-representation.md) M8).
-- Row order, whitespace, and trailing zeros on round values are not significant to the checker.
+- **Header:** exactly `client,available,held,total,locked`, with no spaces. Always printed on a successful run, even when there are no accounts.
+- **Rows:** one per account, and nothing else. An account exists only if it was opened under §4; ignored and invalid rows never add a row.
+- **Order:** ascending by `client`.
+- **Amounts:** `available`, `held`, and `total` are printed with exactly 4 fractional digits (`2.0000`, `-0.5000`), an optional `-`, no `+`, no leading zeros, no grouping separators, and no exponent. Zero is `0.0000`, never `-0.0000`. Formatting uses integer arithmetic only and keeps the sign of values between `-1` and `0` ([ADR-0007](decisions/0007-money-representation.md) M8). Negative balances are printed as they are.
+- **`locked`:** `true` or `false`.
+- **Encoding:** ASCII, `,` separators with no surrounding whitespace, no quoting, and `\n` after every record including the last.
+- **When:** the CSV is written only after the whole input is processed. If the run fails before that, stdout stays empty.
 
-Example:
+The checker ignores row order, whitespace, and trailing zeros on round values; the rules above still fix one exact output per input, so tests can compare bytes.
+
+Example input:
+
+```
+type, client, tx, amount
+deposit, 2, 1, 2.0
+deposit, 1, 2, 0.5
+withdrawal, 3, 3, 1.0
+withdrawal, 1, 4, 0.5
+dispute, 1, 2,
+chargeback, 1, 2,
+dispute, 4, 99,
+deposit, 2, 5, 0.0001
+dispute, 2, 5,
+```
+
+Exact output:
 
 ```
 client,available,held,total,locked
-1,1.5,0,1.5,false
-2,2,0,2,false
+1,-0.5000,0.0000,-0.5000,true
+2,2.0000,0.0001,2.0001,false
+3,0.0000,0.0000,0.0000,false
 ```
+
+Client 3's withdrawal is rejected but still opens a zero-balance account; client 4's dispute is ignored and opens none. The ADR walks through each row.
 
 ## 4. Account model
 
@@ -132,7 +157,7 @@ This section is a living catalog. It will grow with more attack scenarios and in
 
 ### Attack scenarios
 
-The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dispute-lifecycle.md), M1 to M8 of [ADR-0007](decisions/0007-money-representation.md), and L1 to L7 of [ADR-0008](decisions/0008-locked-account-policy.md). Rows are listed in input order; `c1`/`c2` are client IDs. Results are `available / held / total / locked`.
+The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dispute-lifecycle.md), M1 to M8 of [ADR-0007](decisions/0007-money-representation.md), L1 to L7 of [ADR-0008](decisions/0008-locked-account-policy.md), and O1 to O10 of [ADR-0009](decisions/0009-output-format.md). Rows are listed in input order; `c1`/`c2` are client IDs. Results are `available / held / total / locked`.
 
 | ID | Rule | Scenario (input rows) | Expected behavior |
 |----|------|-----------------------|-------------------|
@@ -161,6 +186,7 @@ The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dis
 | A23 | L5, R2 | `c1` deposit tx1 100; `c1` deposit tx2 100; `c1` deposit tx3 100; `c1` withdrawal tx4 300; `c1` dispute tx1; `c1` dispute tx2; `c1` dispute tx3; `c1` chargeback tx1; `c1` chargeback tx2; `c1` chargeback tx3 | Several disputed deposits: the first chargeback locks (`-300 / 200 / -100 / true`) and the later ones still apply, so the full debt shows. `-300 / 0 / -300 / true`. |
 | A24 | L1, L2, L5 | `c1` deposit tx1 10; `c1` dispute tx1; `c1` chargeback tx1; `c1` deposit tx2 50; `c1` dispute tx2; `c1` chargeback tx2 | Locked at `0 / 0 / 0 / true`. The deposit after the lock is applied (`50 / 0 / 50 / true`) and stays disputable (`0 / 50 / 50 / true`). Its chargeback returns the account to `0 / 0 / 0 / true`; the lock stays. |
 | A25 | L3, L4, L7, R7 | `c1` deposit tx1 10; `c1` deposit tx2 5; `c1` dispute tx1; `c1` chargeback tx1; `c1` withdrawal tx3 100; `c1` withdrawal tx4 1; `c1` dispute tx3 | Locked at `5 / 0 / 5 / true`. Both withdrawals are rejected with the reason "account locked", including tx3, which also lacks funds. The dispute on tx3 is ignored because a rejected withdrawal is never stored. `5 / 0 / 5 / true`. |
+| A26 | O1 to O9 | The example input in §3 | stdout is exactly the example output in §3, byte for byte: sorted rows, fixed 4-digit amounts, `-0.5000` for client 1, a zero-balance row for client 3, and no row for client 4. |
 
 ### Invariants
 
@@ -175,6 +201,7 @@ The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dis
 | I7 | M1, M4, M5 | Every stored amount is strictly positive and equals exactly the value in the input; no amount is ever rounded or truncated |
 | I8 | L3 | No withdrawal is ever applied to an account whose `locked` is `true` |
 | I9 | L2, L5 | A `deposit`, `dispute`, `resolve`, or `chargeback` row has the same effect on balances and transaction states whether or not the account is locked |
+| I10 | O1 to O10 | The output is a function of the input alone: the same input always produces byte-identical stdout, and every printed `total` equals the printed `available + held` |
 
 ## 7. Given assumptions
 
