@@ -88,7 +88,7 @@ The dispute lifecycle follows [ADR-0006](decisions/0006-dispute-lifecycle.md): `
 
 ### Rows to ignore
 
-These are treated as upstream errors and skipped without failing the run. "Skipped" means no state change, no balance change, no account created, and a diagnostic on stderr. Diagnostics are bounded: full detail (row type, client, `tx`, owning client when known, reason, input line) for the first 100 rows, then only an end-of-run summary with one count per reason. A failure to write stderr is ignored and never affects stdout, account state, or the exit code (ADR-0006, R10).
+These are treated as upstream errors and skipped without failing the run. "Skipped" means no state change, no balance change, no account created, and a diagnostic on stderr. Diagnostics are bounded: full detail (row type, client, `tx`, owning client when known, reason, input line) for the first 100 rows, then only an end-of-run summary with one count per reason. A failure to write stderr is ignored and never affects stdout, account state, or the exit code. Writes are still blocking: the cap bounds volume, not write latency, so the caller must drain piped stderr or redirect it. A stalled stderr reader is an accepted limitation (ADR-0006, R10).
 
 - `dispute`, `resolve`, or `chargeback` whose `tx` does not exist or was never stored (for example a rejected withdrawal).
 - `dispute`, `resolve`, or `chargeback` on a withdrawal.
@@ -113,9 +113,9 @@ The engine must behave like a cautious bank under this and similar abuse: it mus
 
 The engine applies accounting and withdrawal rules to the supplied events. It cannot determine whether a deposit is irrevocable or safe to withdraw. The full split is in [ADR-0006](decisions/0006-dispute-lifecycle.md#engine-boundary-and-residual-risk):
 
-- **Enforced by the engine:** the invariants below, ownership checks, full-amount holds with visible debt, withdrawal rejection when funds are insufficient and permanently after a chargeback, and bounded diagnostics.
-- **Required from upstream (deployment prerequisite):** only deposits that are irrevocable, or fully backed by enforceable collateral or a funding guarantee, are admitted; events are authoritative, chronologically ordered, and deduplicated. Settlement or a fixed waiting period alone is not proof that a payment cannot be reversed.
-- **Residual risk accepted for this scope:** without upstream protection, the attack above remains a financial exposure. Recording a negative balance after a reversal does not prevent the initial loss: a client can withdraw a reversible deposit before the dispute arrives, and the later lock cannot recover funds already paid out. A deposit accepted on a locked account is not final recovery if it can itself be reversed.
+- **Enforced by the engine:** the invariants below, ownership checks, full-amount holds with visible debt, withdrawal rejection when funds are insufficient and permanently after a chargeback, and bounded diagnostic volume.
+- **Required from upstream (deployment prerequisite):** only deposits that are irrevocable, or fully backed by enforceable collateral or a funding guarantee, are admitted; events are authoritative, chronologically ordered, and deduplicated; piped stderr is drained or redirected. Settlement or a fixed waiting period alone is not proof that a payment cannot be reversed.
+- **Residual risk accepted for this scope:** without upstream protection, the attack above remains a financial exposure. Recording a negative balance after a reversal does not prevent the initial loss: a client can withdraw a reversible deposit before the dispute arrives, and the later lock cannot recover funds already paid out. A deposit accepted on a locked account is not final recovery if it can itself be reversed. A stderr reader that stops consuming can block the run.
 
 Enforcing withdrawal eligibility inside the engine would need additional input information and a separate ADR.
 
@@ -142,7 +142,7 @@ The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dis
 | A13 | R2, R9 | A1 rows, then `c1` deposit tx3 150; `c1` withdrawal tx4 10 | The deposit repays the debt on the locked account: `50 / 0 / 50 / true`. The withdrawal is rejected and the lock stays. |
 | A14 | R2, R5 | `c1` deposit tx1 100; `c1` dispute tx1; `c1` resolve tx1; `c1` withdrawal tx2 100; `c1` dispute tx1; `c1` chargeback tx1 | After the resolve and withdrawal: `0 / 0 / 0 / false`. The second dispute is recorded: `-100 / 100 / 0 / false`. The chargeback records the debt and locks: `-100 / 0 / -100 / true`. |
 | A15 | R10 | `c1` deposit tx1 10, then 1,000,000 rows that are each ignored (for example `c2` dispute tx1) | `c1` stays `10 / 0 / 10 / false`; no account for `c2`. stderr has at most 100 detailed entries, one suppression notice, and a summary that counts all 1,000,000 ignored rows. |
-| A16 | R10 | Any A1 to A14 input, run with stderr closed or failing on write | The run completes without a panic, stdout has the same CSV as with a working stderr, and the exit code is unchanged. |
+| A16 | R10 | Any A1 to A14 input, run with stderr closed or failing on write | The run completes without a panic, stdout has the same CSV as with a working stderr, and the exit code is unchanged. This covers closed or failing stderr only; a reader that stops consuming a pipe can block the run and is an accepted limitation. |
 
 ### Invariants
 

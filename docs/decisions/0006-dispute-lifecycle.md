@@ -50,7 +50,7 @@ Chosen options, all part of one lifecycle:
 | R7 | A dispute, resolve, or chargeback on a `tx` that does not exist, was never stored (for example a rejected withdrawal), or is not in the required state is ignored. | Only stored deposits can enter the lifecycle. Everything else is an upstream error. |
 | R8 | Only a `deposit` or `withdrawal` row creates a client account, including a rejected withdrawal (balance zero). Ignored rows never create an account. | Garbage rows must not add clients to the output. |
 | R9 | A **locked** account still processes `dispute`, `resolve`, and `chargeback` on its stored deposits and **accepts new deposits**, but **rejects every withdrawal**. | The platform must be able to close or enforce every open claim and let the client repay a debt, while no money can ever leave a charged-back account. |
-| R10 | Diagnostics for ignored and rejected rows are **bounded**: full detail for the first 100 rows per run, then a single notice that further detail is suppressed, and a summary at the end of the run with one count per reason. Writing to stderr is best effort. | Diagnostics must help investigation without letting a hostile input fill the disk or stall processing. |
+| R10 | Diagnostics for ignored and rejected rows are **bounded**: full detail for the first 100 rows per run, then a single notice that further detail is suppressed, and a summary at the end of the run with one count per reason. Writing to stderr is best effort. | Diagnostics must help investigation without letting a hostile input fill the disk. The cap bounds the volume; it does not make writes nonblocking. |
 
 "Ignored" always means: no state change, no balance change, no account created, no failure of the run, and an entry in the diagnostics under R10. A detailed entry includes the row type, client, `tx`, the owning client (when known), the reason, and the input line number. Every ignored row is counted in the end-of-run summary, so none is skipped silently.
 
@@ -59,6 +59,9 @@ Diagnostics details (R10):
 * The limit of 100 detailed entries is one named constant in the code. Each entry has a bounded length; any raw input echoed in it is truncated.
 * The summary has one line per reason, so its size is bounded by the number of reasons, not by the input.
 * A failure to write to stderr is ignored. It never causes a panic, never changes account state, never touches stdout, and never changes the exit code. In Rust this rules out `eprintln!`, which panics when the write fails.
+* The cap bounds diagnostic volume; it does not guarantee nonblocking writes. A write to a full pipe blocks, without returning an error, until the reader consumes data. If the reader stops consuming, the run stalls. Ignoring write errors does not cover this case.
+* The caller must drain piped stderr or redirect it to a suitable destination, such as a file or `/dev/null`.
+* A stalled stderr destination is an accepted limitation for the current CLI scope. No asynchronous logging or CLI change is introduced for it.
 * A failure to write stdout is a real error, handled by the error-handling decision.
 
 ### State machine
@@ -102,18 +105,20 @@ The engine applies accounting and withdrawal rules to the events it is given. It
 * Ownership checks on every dispute, resolve, and chargeback (R3).
 * Full-amount holds and visible debt, even when funds were already withdrawn (R2).
 * Withdrawals rejected when `available` is insufficient or negative, and permanently after a chargeback (R9).
-* Bounded diagnostics for every ignored row (R10).
+* Bounded diagnostic volume for ignored rows, with write failures ignored (R10).
 
 **Guarantees required from upstream systems (deployment prerequisites, not established by the CSV):**
 
 * Preventing an uncovered reversal loss requires an upstream system that admits only deposits that are irrevocable, or fully backed by enforceable collateral or a funding guarantee.
 * Events are authoritative, chronologically ordered, and deduplicated (see above).
+* The caller drains piped stderr or redirects it to a suitable destination (R10).
 * Settlement, or a fixed waiting period alone, must not be presented as proof that a payment cannot be reversed. Card disputes can arrive months after the payment, and unauthorized ACH returns up to 60 days later.
 
 **Residual risks accepted for the current scope:**
 
 * Without upstream protection, deposit → withdrawal → dispute → chargeback remains a financial exposure. A client can withdraw a reversible deposit before the dispute arrives. The engine records the resulting debt; it does not prevent the loss or guarantee its recovery.
 * A deposit accepted on a locked account (R9) is not a final recovery if that deposit can itself be reversed.
+* A stderr reader that stops consuming can block the run, because diagnostic writes are blocking (R10).
 * Enforcing withdrawal eligibility inside a production engine (for example, only against irrevocable funds) would need additional input information and a separate ADR. This change does not add settlement events, required flags, or a waiting period.
 
 ### Consequences
@@ -122,7 +127,8 @@ The engine applies accounting and withdrawal rules to the events it is given. It
 * Good, because a second dispute after a resolve is recorded (A14), so an external reversal that happens after a resolve still shows up as debt and locks the account on chargeback.
 * Good, because `held` always equals the sum of the amounts of deposits in `Disputed`, which gives tests a precise invariant.
 * Good, because the states can be modeled as separate types whose transition methods consume the previous state, so a chargeback on a `Processed` deposit does not compile.
-* Good, because diagnostics stay bounded on hostile input while the summary still counts every ignored row.
+* Good, because diagnostic volume stays bounded on hostile input while the summary still counts every ignored row.
+* Bad, because a stalled stderr reader can still block the run. Accepted for the current CLI scope; the caller must drain or redirect stderr.
 * Neutral, because negative balances are written to the output unchanged. If a regulator ever requires non-negative displayed balances, the clamp belongs in the output formatting only, as a new ADR that supersedes this one; the ledger must keep the true values for audits. Such a clamp would break `total = available + held` in the printed output.
 * Neutral, because flagging a client that sends cross-client rows is not implemented. The diagnostics are the hook for adding it later.
 * Neutral, because after the first 100 detailed entries, further ignored rows appear only in the summary counts.
@@ -179,11 +185,11 @@ Standard controls that the input format cannot express. Adding any of them needs
 
 ### Diagnostics volume
 
-* **Bounded detail with aggregated counts (chosen).** Good, because output size is bounded regardless of input, and every ignored row is still counted. Bad, because rows after the first 100 lose their individual detail.
-* **A detailed line for every ignored row.** Bad, because a hostile input can fill the disk through redirected stderr or stall processing on a slow stderr consumer.
+* **Bounded detail with aggregated counts (chosen).** Good, because output size is bounded regardless of input, and every ignored row is still counted. Bad, because rows after the first 100 lose their individual detail. Neutral, because writes stay blocking, so a stalled reader can still block the run.
+* **A detailed line for every ignored row.** Bad, because a hostile input can fill the disk through redirected stderr, and the amount a stderr reader must consume grows with the input.
 
 ## More Information
 
 * Answers the open questions about withdrawal disputes, cross-client references, re-dispute, negative `available`, and locked accounts in [requirements §10](../requirements.md). Duplicate `tx` IDs on deposits and withdrawals, malformed rows, and amount rounding are decided elsewhere.
-* Industry references: [Regulation E error resolution, 12 CFR 1005.11](https://www.ecfr.gov/current/title-12/chapter-X/part-1005/subpart-A/section-1005.11), [Nacha rules on unauthorized return reasons](https://www.nacha.org/rules/differentiating-unauthorized-return-reasons), [Stripe guidance on multiple disputes per payment](https://support.stripe.com/questions/receiving-multiple-disputes-per-payment-faq), and the [OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html) on preventing logging from exhausting resources.
+* Industry references: [Regulation E error resolution, 12 CFR 1005.11](https://www.ecfr.gov/current/title-12/chapter-X/part-1005/subpart-A/section-1005.11), [Nacha rules on unauthorized return reasons](https://www.nacha.org/rules/differentiating-unauthorized-return-reasons), [Stripe guidance on multiple disputes per payment](https://support.stripe.com/questions/receiving-multiple-disputes-per-payment-faq), the [OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html) on preventing logging from exhausting resources, and the [Rust `Stdio` documentation](https://doc.rust-lang.org/std/process/struct.Stdio.html) on blocking pipes.
 * Tracked by issue LYA-41 (D3). The attack catalog (D8) and the dispute implementation (E4) build on the scenarios in requirements §6.
