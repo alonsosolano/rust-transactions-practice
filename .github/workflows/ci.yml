@@ -1,0 +1,17 @@
+# Manual-only until GitHub Actions minutes are available (ADR-0005).
+# To enable automatic runs, add `push` and `pull_request` triggers below.
+name: CI
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # rustup on the runner installs the toolchain from rust-toolchain.toml.
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo build --release
