@@ -57,6 +57,8 @@ Invariants that must hold after every operation:
 
 - `total = available + held`
 - `locked` becomes `true` after a chargeback and never reverts.
+- `held` equals the sum of the amounts of the deposits currently under dispute.
+- `available` and `total` may be negative: a dispute or chargeback on funds that were already withdrawn leaves the debt visible ([ADR-0006](decisions/0006-dispute-lifecycle.md)).
 
 ## 5. Operations
 
@@ -70,18 +72,51 @@ Invariants that must hold after every operation:
 
 `dispute`, `resolve`, and `chargeback` carry no amount of their own; they always use the amount of the transaction they reference.
 
+The dispute lifecycle follows [ADR-0006](decisions/0006-dispute-lifecycle.md): `Processed → Disputed → Resolved | ChargedBack`, where `Resolved` and `ChargedBack` are terminal. Only stored deposits are disputable. A dispute moves the full amount to `held` even if `available` goes negative.
+
 ### Rows to ignore
 
-These are treated as upstream errors and skipped without failing the run:
+These are treated as upstream errors and skipped without failing the run. "Skipped" means no state change, no balance change, no account created, and a detailed diagnostic on stderr (row type, client, `tx`, owning client when known, reason, input line).
 
-- `dispute` whose `tx` does not exist.
-- `resolve` or `chargeback` whose `tx` does not exist or is not currently under dispute.
+- `dispute`, `resolve`, or `chargeback` whose `tx` does not exist or was never stored (for example a rejected withdrawal).
+- `dispute`, `resolve`, or `chargeback` on a withdrawal.
+- `dispute`, `resolve`, or `chargeback` whose `client` differs from the client that owns the `tx`.
+- `dispute` on a `tx` that is already under dispute, already resolved, or already charged back.
+- `resolve` or `chargeback` whose `tx` is not currently under dispute.
+- `withdrawal` on a locked account (rejected; balances unchanged). Deposits on a locked account are still accepted, so the client can repay a debt.
+
+Only a `deposit` or `withdrawal` row creates a client account, including a rejected withdrawal. Ignored rows never do.
 
 ## 6. Given assumptions
 
 - One asset account per client; every operation targets that account.
 - Clients are identified only by their `u16` ID. No other profile data.
 - When a rule is ambiguous, choose the behavior a bank or ATM processor would choose, and document it as an ADR.
+
+### Dispute scenarios
+
+Attacks (`A`) and invariants (`I`) that cover every rule R1 to R9 of [ADR-0006](decisions/0006-dispute-lifecycle.md). Rows are listed in input order; `c1`/`c2` are client IDs. Results are `available / held / total / locked`.
+
+| ID | Rule | Input rows | Expected behavior |
+|----|------|------------|-------------------|
+| A1 | R2 | `c1` deposit tx1 100; `c1` withdrawal tx2 100; `c1` dispute tx1; `c1` chargeback tx1 | After the dispute: `-100 / 100 / 0 / false`. After the chargeback: `-100 / 0 / -100 / true`. The debt stays visible. |
+| A2 | R2 | `c1` deposit tx1 100; `c1` withdrawal tx2 100; `c1` dispute tx1; `c1` withdrawal tx3 10; `c1` resolve tx1 | The withdrawal is rejected while `available` is negative (`-100 / 100 / 0 / false`). The resolve restores `0 / 0 / 0 / false`. |
+| A3 | R1 | `c1` deposit tx1 100; `c1` withdrawal tx2 40; `c1` dispute tx2; `c1` resolve tx2; `c1` chargeback tx2 | All three rows on the withdrawal are ignored. Result: `60 / 0 / 60 / false`. |
+| A4 | R3 | `c1` deposit tx1 10; `c2` dispute tx1 | Ignored with a log naming `c1` as owner. `c1`: `10 / 0 / 10 / false`. `c2` has no account. |
+| A5 | R3 | `c1` deposit tx1 10; `c1` dispute tx1; `c2` resolve tx1; `c2` chargeback tx1 | Both `c2` rows are ignored. `c1` stays disputed: `0 / 10 / 10 / false`. |
+| A6 | R8 | `c9` dispute tx7 | Ignored. No account for `c9`; the output has only the header. |
+| A7 | R4 | `c1` deposit tx1 10; `c1` dispute tx1; `c1` dispute tx1 | The second dispute is ignored. `0 / 10 / 10 / false`; the deposit is held once. |
+| A8 | R5 | `c1` deposit tx1 10; `c1` dispute tx1; `c1` resolve tx1; `c1` dispute tx1; `c1` chargeback tx1 | The re-dispute and the chargeback are ignored. `10 / 0 / 10 / false`. |
+| A9 | R6 | `c1` deposit tx1 10; `c1` deposit tx2 5; `c1` dispute tx1; `c1` chargeback tx1; `c1` chargeback tx1; `c1` dispute tx1; `c1` resolve tx1 | Only the first chargeback applies. `5 / 0 / 5 / true`. |
+| A10 | R7 | `c1` deposit tx1 5; `c1` withdrawal tx2 10 (rejected); `c1` dispute tx2; `c1` dispute tx99; `c1` resolve tx1; `c1` chargeback tx1 | All dispute-related rows are ignored (rejected withdrawal, unknown `tx`, deposit not under dispute). `5 / 0 / 5 / false`. |
+| A11 | R9 | `c1` deposit tx1 10; `c1` deposit tx2 5; `c1` dispute tx1; `c1` chargeback tx1; `c1` deposit tx3 20; `c1` withdrawal tx4 5 | Locked after the chargeback (`5 / 0 / 5 / true`). The deposit is accepted and the withdrawal is rejected. `25 / 0 / 25 / true`. |
+| A12 | R9 | `c1` deposit tx1 10; `c1` deposit tx2 10; `c1` dispute tx1; `c1` dispute tx2; `c1` chargeback tx1; `c1` resolve tx2 | Dispute-related rows still work on a locked account. After the chargeback: `0 / 10 / 10 / true`. After the resolve: `10 / 0 / 10 / true`. |
+| A13 | R2, R9 | A1 rows, then `c1` deposit tx3 150; `c1` withdrawal tx4 10 | The deposit repays the debt on the locked account: `50 / 0 / 50 / true`. The withdrawal is rejected and the lock stays. |
+| I1 | all | any stream | `total = available + held` after every row. |
+| I2 | R2, R4 | any stream | `held` equals the sum of the amounts of deposits in `Disputed`. |
+| I3 | R9 | any stream | `locked` never reverts to `false`. |
+| I4 | R3 to R7 | any stream | An ignored row changes no balance and no transaction state. |
+| I5 | R1 | any stream | Only deposits ever reach `Disputed`, `Resolved`, or `ChargedBack`. |
 
 ## 7. Quality goals
 
@@ -103,11 +138,6 @@ Listed in the order reviewers will weigh them when the output is already correct
 
 Not answered by the brief. Each must be decided in an ADR before or while implementing it.
 
-- Can a withdrawal be disputed, and if so, what happens to `available` and `held`?
-- What happens when a dispute, resolve, or chargeback references a `tx` that belongs to a different client?
-- Which operations, if any, are allowed on a locked account?
 - How to handle a repeated `tx` ID on a deposit or withdrawal.
-- Can a transaction be disputed again after it was resolved?
-- Can a dispute drive `available` negative (funds already withdrawn)?
 - How to handle malformed rows: skip and log to stderr, or abort?
 - Rounding or rejection of amounts with more than 4 fractional digits, and of zero or negative amounts.
