@@ -1,0 +1,9 @@
+/target
+
+# The original exercise statement must never be committed (ADR-0001).
+*.pdf
+
+# OS / editor noise
+.DS_Store
+.idea/
+.vscode/

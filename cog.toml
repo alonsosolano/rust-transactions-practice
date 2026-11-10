@@ -1,0 +1,10 @@
+# Cocogitto configuration: https://docs.cocogitto.io/reference/config.html
+# Install the hooks once per clone with: cog install-hook --all
+
+ignore_merge_commits = true
+
+[git_hooks.commit-msg]
+script = """#!/bin/sh
+set -e
+cog verify --file "$1"
+"""
