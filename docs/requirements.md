@@ -34,12 +34,19 @@ CSV with a header row and the columns `type, client, tx, amount`.
 | `type`   | string  | `deposit`, `withdrawal`, `dispute`, `resolve`, `chargeback` |
 | `client` | `u16`   | Client identifier |
 | `tx`     | `u32`   | Transaction identifier, globally unique |
-| `amount` | decimal | Up to 4 fractional digits. Present for `deposit` and `withdrawal`; empty or missing for the other three types |
+| `amount` | decimal | Up to 4 fractional digits, strictly positive. Present for `deposit` and `withdrawal`; empty or missing for the other three types |
 
 Parsing must tolerate:
 
 - Whitespace around fields and headers.
 - Any decimal precision up to 4 fractional digits (`1`, `1.0`, `1.2345`).
+
+Amounts follow [ADR-0007](decisions/0007-money-representation.md):
+
+- Stored as exact fixed-point integers in units of `0.0001`. No floating point is used, and no amount is ever rounded or truncated.
+- Valid form: ASCII digits, optionally followed by `.` and more digits. Extra fractional digits beyond the fourth are accepted only if they are zeros (`1.23450`); leading zeros are accepted (`007.5`).
+- Valid range: `0.0001` to `1844674407370955.1615`.
+- Anything else makes the `deposit` or `withdrawal` row invalid: a sign (`-5`, `+5`), `.5`, `5.`, exponents (`1e3`), separators (`1_000`, `1,000`), zero, more than 4 non-zero fractional digits, or a value above the range. An invalid row never changes state and never creates an account. How it is reported is decided with the handling of malformed rows (§10).
 
 Ordering:
 
@@ -50,7 +57,7 @@ Ordering:
 
 CSV with the columns `client, available, held, total, locked`, one row per client seen in the input.
 
-- Amounts are printed with 4 fractional digits of precision.
+- Amounts are printed with 4 fractional digits of precision. Formatting uses integer arithmetic only and keeps the sign of values between `-1` and `0` ([ADR-0007](decisions/0007-money-representation.md) M8).
 - Row order, whitespace, and trailing zeros on round values are not significant to the checker.
 
 Example:
@@ -63,7 +70,7 @@ client,available,held,total,locked
 
 ## 4. Account model
 
-Each client has exactly one account, created by the first `deposit` or `withdrawal` row for that client, even if the withdrawal is rejected. Rows that are ignored never create an account ([ADR-0006](decisions/0006-dispute-lifecycle.md)).
+Each client has exactly one account, created by the first `deposit` or `withdrawal` row for that client, even if the withdrawal is rejected. Rows that are ignored never create an account ([ADR-0006](decisions/0006-dispute-lifecycle.md)). Neither do invalid rows: a withdrawal with an invalid amount is not a rejected withdrawal ([ADR-0007](decisions/0007-money-representation.md) M6).
 
 Invariants that must hold after every operation:
 
@@ -71,6 +78,7 @@ Invariants that must hold after every operation:
 - `locked` becomes `true` after a chargeback and never reverts.
 - `held` equals the sum of the amounts of the deposits currently under dispute.
 - `available` and `total` may be negative: a dispute or chargeback on funds that were already withdrawn leaves the debt visible ([ADR-0006](decisions/0006-dispute-lifecycle.md)).
+- No balance ever overflows silently. Balances are wide enough that valid input cannot overflow them, and every change is still checked ([ADR-0007](decisions/0007-money-representation.md)).
 
 ## 5. Operations
 
@@ -96,6 +104,7 @@ These are treated as upstream errors and skipped without failing the run. "Skipp
 - `dispute` on a `tx` that is already under dispute or already charged back. A dispute on a resolved `tx` is not ignored; it opens a new cycle.
 - `resolve` or `chargeback` whose `tx` is not currently under dispute.
 - `withdrawal` on a locked account (rejected; balances unchanged). Deposits on a locked account are still accepted, so the client can repay a debt.
+- Any row whose effect would overflow a balance ([ADR-0007](decisions/0007-money-representation.md) M7). Unreachable for valid input; kept as defense in depth.
 
 Only a `deposit` or `withdrawal` row creates a client account, including a rejected withdrawal. Ignored rows never do.
 
@@ -123,7 +132,7 @@ This section is a living catalog. It will grow with more attack scenarios and in
 
 ### Attack scenarios
 
-The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dispute-lifecycle.md). Rows are listed in input order; `c1`/`c2` are client IDs. Results are `available / held / total / locked`.
+The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dispute-lifecycle.md) and M1 to M8 of [ADR-0007](decisions/0007-money-representation.md). Rows are listed in input order; `c1`/`c2` are client IDs. Results are `available / held / total / locked`.
 
 | ID | Rule | Scenario (input rows) | Expected behavior |
 |----|------|-----------------------|-------------------|
@@ -143,6 +152,12 @@ The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dis
 | A14 | R2, R5 | `c1` deposit tx1 100; `c1` dispute tx1; `c1` resolve tx1; `c1` withdrawal tx2 100; `c1` dispute tx1; `c1` chargeback tx1 | After the resolve and withdrawal: `0 / 0 / 0 / false`. The second dispute is recorded: `-100 / 100 / 0 / false`. The chargeback records the debt and locks: `-100 / 0 / -100 / true`. |
 | A15 | R10 | `c1` deposit tx1 10, then 1,000,000 rows that are each ignored (for example `c2` dispute tx1) | `c1` stays `10 / 0 / 10 / false`; no account for `c2`. stderr has at most 100 detailed entries, one suppression notice, and a summary that counts all 1,000,000 ignored rows. |
 | A16 | R10 | Any A1 to A14 input, run with stderr closed or failing on write | The run completes without a panic, stdout has the same CSV as with a working stderr, and the exit code is unchanged. This covers closed or failing stderr only; a reader that stops consuming a pipe can block the run and is an accepted limitation. |
+| A17 | M3, M6 | `c1` deposit tx1 10; `c1` withdrawal tx2 -5; `c2` withdrawal tx3 -5 | Both withdrawals are invalid, so a negative withdrawal cannot create money. `c1`: `10 / 0 / 10 / false`. `c2` has no account. |
+| A18 | M3, M6 | `c1` deposit tx1 5; `c1` deposit tx2 -10; `c1` withdrawal tx3 10 | The negative deposit is invalid and cannot bypass the funds check, so the withdrawal is rejected for insufficient funds. `5 / 0 / 5 / false`. |
+| A19 | M4 | `c1` deposit tx1 1.00005; `c1` deposit tx2 1.23450 | tx1 is invalid and is never rounded. tx2 is accepted as `1.2345`. `1.2345 / 0 / 1.2345 / false`. |
+| A20 | M5, M6 | `c1` deposit tx1 0; `c2` withdrawal tx2 0.0000 | Both rows are invalid. No accounts; the output has only the header. |
+| A21 | M2, M5 | `c1` deposit tx1 1844674407370955.1615; `c1` deposit tx2 1844674407370955.1615; `c1` deposit tx3 1844674407370955.1616 | tx1 and tx2 are accepted; their sum does not overflow the balance. tx3 is above the range and invalid. `3689348814741910.3230 / 0 / 3689348814741910.3230 / false`. |
+| A22 | M3 | `c1` deposits with amounts `.5`, `5.`, `+5`, `1e3`, `1_000`, and `" 2.5 "` (tx1 to tx6) | Only tx6 is accepted, after trimming the whitespace. `2.5 / 0 / 2.5 / false`. |
 
 ### Invariants
 
@@ -153,6 +168,8 @@ The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dis
 | I3 | R3 to R8 | A rejected or ignored row leaves every account and every transaction state unchanged. The only exception is that a rejected withdrawal still creates a zero-balance account for an unseen client (R8). |
 | I4 | R2, R4, R5 | `held` equals the sum of the amounts of the deposits currently in `Disputed` |
 | I5 | R1 | Only deposits ever reach `Disputed`, `Resolved`, or `ChargedBack` |
+| I6 | M2, M7 | No balance ever overflows silently: every change to `available`, `held`, or `total` is checked, and a row whose effect would overflow leaves every account unchanged |
+| I7 | M1, M4, M5 | Every stored amount is strictly positive and equals exactly the value in the input; no amount is ever rounded or truncated |
 
 ## 7. Given assumptions
 
@@ -181,5 +198,4 @@ Listed in the order reviewers will weigh them when the output is already correct
 Not answered by the brief. Each must be decided in an ADR before or while implementing it.
 
 - How to handle a repeated `tx` ID on a deposit or withdrawal.
-- How to handle malformed rows: skip and log to stderr, or abort?
-- Rounding or rejection of amounts with more than 4 fractional digits, and of zero or negative amounts.
+- How to handle malformed rows: skip and log to stderr, or abort? This includes `deposit` and `withdrawal` rows whose amount is invalid under [ADR-0007](decisions/0007-money-representation.md).
