@@ -2,6 +2,8 @@
 
 Behavior contract for the transaction engine. Written for this repo from the project brief; any interpretation beyond what is stated here must be recorded as an ADR.
 
+**Precedence:** where the prose of the brief is inconsistent, the described input and output file formats take precedence over the prose.
+
 ## 1. Command-line interface
 
 ```sh
@@ -12,6 +14,16 @@ cargo run -- transactions.csv > accounts.csv
 - Account state is written to **stdout** as CSV. Nothing else may go to stdout.
 - Errors and diagnostics go to stderr.
 - The interface is checked by automated tests, so it must not change.
+
+### How the submission is evaluated
+
+1. **Automated gate first.** The binary is run against a set of sample inputs and its output is compared with the expected output. Only if this passes does manual review happen.
+2. **Manual review** then covers everything else (see section 8).
+
+Consequences:
+
+- Correct output through the exact CLI above is the top priority; any other interface, flag, or entry point is ignored by reviewers.
+- Nothing may be written to stdout except the output CSV, or the comparison fails.
 
 ## 2. Input
 
@@ -77,13 +89,39 @@ These are treated as upstream errors and skipped without failing the run:
 - `dispute` whose `tx` does not exist.
 - `resolve` or `chargeback` whose `tx` does not exist or is not currently under dispute.
 
-## 6. Given assumptions
+## 6. Threat model and invariants
+
+Card and bank transfers can be reversed after the fact, which is good for consumers but exposes the processor to fraud. The motivating attack:
+
+1. Deposit funds through a reversible payment method.
+2. Spend or withdraw those funds immediately.
+3. Dispute the original deposit and get it charged back, keeping what was withdrawn.
+
+The engine must behave like a cautious bank under this and similar abuse: it must never create money, never lose track of held funds, and must freeze an account once a chargeback happens.
+
+This section is a living catalog. It will grow with more attack scenarios and invariants as decisions are made; each entry must be backed by at least one test (unit, sample CSV, or property-based).
+
+### Attack scenarios
+
+| ID | Scenario | Expected behavior |
+|----|----------|-------------------|
+| A1 | Deposit, withdraw, then dispute and charge back the deposit | Decided in an ADR (see open questions on disputes driving `available` negative) |
+
+### Invariants
+
+| ID | Invariant |
+|----|-----------|
+| I1 | `total = available + held` for every account after every row |
+| I2 | `locked` never goes from `true` back to `false` |
+| I3 | A rejected or ignored row leaves every account unchanged |
+
+## 7. Given assumptions
 
 - One asset account per client; every operation targets that account.
 - Clients are identified only by their `u16` ID. No other profile data.
 - When a rule is ambiguous, choose the behavior a bank or ATM processor would choose, and document it as an ADR.
 
-## 7. Quality goals
+## 8. Quality goals
 
 Listed in the order reviewers will weigh them when the output is already correct.
 
@@ -93,13 +131,13 @@ Listed in the order reviewers will weigh them when the output is already correct
 4. **Resource use**: stream the input instead of loading it all into memory. Transaction IDs span the full `u32` range, so per-transaction state must be sized with that in mind. Keep the design compatible with a future where the engine runs inside a server processing many concurrent input streams.
 5. **Maintainability**: clean, readable code is preferred over clever or micro-optimized code. Reviewers read the code without the author present, so the README must explain the design, the assumptions, and how correctness was verified.
 
-## 8. Deliverable constraints
+## 9. Deliverable constraints
 
 - A plain crate created with `cargo new` / `cargo init`, buildable with `cargo build` and runnable with `cargo run`.
 - Published as a public GitHub repository.
-- Dependencies limited to common, well-maintained crates (for example `serde` and `csv`).
+- Dependencies limited to common, well-maintained crates that we consider secure (for example `serde` and `csv`). Every dependency must have a stated reason, recorded in an ADR, covering why it is needed and why it is trusted (maintenance, adoption, no `unsafe`-heavy or unvetted transitive dependencies).
 
-## 9. Open questions
+## 10. Open questions
 
 Not answered by the brief. Each must be decided in an ADR before or while implementing it.
 
