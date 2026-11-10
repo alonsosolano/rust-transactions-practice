@@ -84,16 +84,16 @@ Invariants that must hold after every operation:
 
 `dispute`, `resolve`, and `chargeback` carry no amount of their own; they always use the amount of the transaction they reference.
 
-The dispute lifecycle follows [ADR-0006](decisions/0006-dispute-lifecycle.md): `Processed → Disputed → Resolved | ChargedBack`, where `Resolved` and `ChargedBack` are terminal. Only stored deposits are disputable. A dispute moves the full amount to `held` even if `available` goes negative.
+The dispute lifecycle follows [ADR-0006](decisions/0006-dispute-lifecycle.md): `Processed → Disputed → Resolved | ChargedBack`. A new dispute on a `Resolved` deposit opens another cycle (`Resolved → Disputed`); `ChargedBack` is terminal. Only stored deposits are disputable. A dispute moves the full amount to `held` even if `available` goes negative.
 
 ### Rows to ignore
 
-These are treated as upstream errors and skipped without failing the run. "Skipped" means no state change, no balance change, no account created, and a detailed diagnostic on stderr (row type, client, `tx`, owning client when known, reason, input line).
+These are treated as upstream errors and skipped without failing the run. "Skipped" means no state change, no balance change, no account created, and a diagnostic on stderr. Diagnostics are bounded: full detail (row type, client, `tx`, owning client when known, reason, input line) for the first 100 rows, then only an end-of-run summary with one count per reason. A failure to write stderr is ignored and never affects stdout, account state, or the exit code (ADR-0006, R10).
 
 - `dispute`, `resolve`, or `chargeback` whose `tx` does not exist or was never stored (for example a rejected withdrawal).
 - `dispute`, `resolve`, or `chargeback` on a withdrawal.
 - `dispute`, `resolve`, or `chargeback` whose `client` differs from the client that owns the `tx`.
-- `dispute` on a `tx` that is already under dispute, already resolved, or already charged back.
+- `dispute` on a `tx` that is already under dispute or already charged back. A dispute on a resolved `tx` is not ignored; it opens a new cycle.
 - `resolve` or `chargeback` whose `tx` is not currently under dispute.
 - `withdrawal` on a locked account (rejected; balances unchanged). Deposits on a locked account are still accepted, so the client can repay a debt.
 
@@ -109,11 +109,21 @@ Card and bank transfers can be reversed after the fact, which is good for consum
 
 The engine must behave like a cautious bank under this and similar abuse: it must never create money, never lose track of held funds, and must freeze an account once a chargeback happens.
 
-This section is a living catalog. It will grow with more attack scenarios and invariants as decisions are made; each entry must be backed by at least one test (unit, sample CSV, or property-based).
+### Engine boundary
+
+The engine applies accounting and withdrawal rules to the supplied events. It cannot determine whether a deposit is irrevocable or safe to withdraw. The full split is in [ADR-0006](decisions/0006-dispute-lifecycle.md#engine-boundary-and-residual-risk):
+
+- **Enforced by the engine:** the invariants below, ownership checks, full-amount holds with visible debt, withdrawal rejection when funds are insufficient and permanently after a chargeback, and bounded diagnostics.
+- **Required from upstream (deployment prerequisite):** only deposits that are irrevocable, or fully backed by enforceable collateral or a funding guarantee, are admitted; events are authoritative, chronologically ordered, and deduplicated. Settlement or a fixed waiting period alone is not proof that a payment cannot be reversed.
+- **Residual risk accepted for this scope:** without upstream protection, the attack above remains a financial exposure. Recording a negative balance after a reversal does not prevent the initial loss: a client can withdraw a reversible deposit before the dispute arrives, and the later lock cannot recover funds already paid out. A deposit accepted on a locked account is not final recovery if it can itself be reversed.
+
+Enforcing withdrawal eligibility inside the engine would need additional input information and a separate ADR.
+
+This section is a living catalog. It will grow with more attack scenarios and invariants as decisions are made; each entry must be backed by at least one test (unit, sample CSV, or property-based). Entries are acceptance criteria for the implementation until those tests exist.
 
 ### Attack scenarios
 
-The `Rule` column refers to the rules R1 to R9 of [ADR-0006](decisions/0006-dispute-lifecycle.md). Rows are listed in input order; `c1`/`c2` are client IDs. Results are `available / held / total / locked`.
+The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dispute-lifecycle.md). Rows are listed in input order; `c1`/`c2` are client IDs. Results are `available / held / total / locked`.
 
 | ID | Rule | Scenario (input rows) | Expected behavior |
 |----|------|-----------------------|-------------------|
@@ -124,12 +134,15 @@ The `Rule` column refers to the rules R1 to R9 of [ADR-0006](decisions/0006-disp
 | A5 | R3 | `c1` deposit tx1 10; `c1` dispute tx1; `c2` resolve tx1; `c2` chargeback tx1 | Both `c2` rows are ignored. `c1` stays disputed: `0 / 10 / 10 / false`. |
 | A6 | R8 | `c9` dispute tx7 | Ignored. No account for `c9`; the output has only the header. |
 | A7 | R4 | `c1` deposit tx1 10; `c1` dispute tx1; `c1` dispute tx1 | The second dispute is ignored. `0 / 10 / 10 / false`; the deposit is held once. |
-| A8 | R5 | `c1` deposit tx1 10; `c1` dispute tx1; `c1` resolve tx1; `c1` dispute tx1; `c1` chargeback tx1 | The re-dispute and the chargeback are ignored. `10 / 0 / 10 / false`. |
+| A8 | R5 | `c1` deposit tx1 10; `c1` dispute tx1; `c1` resolve tx1; `c1` dispute tx1; `c1` chargeback tx1 | The second dispute opens a new cycle (`0 / 10 / 10 / false`) and the chargeback applies. `0 / 0 / 0 / true`. |
 | A9 | R6 | `c1` deposit tx1 10; `c1` deposit tx2 5; `c1` dispute tx1; `c1` chargeback tx1; `c1` chargeback tx1; `c1` dispute tx1; `c1` resolve tx1 | Only the first chargeback applies. `5 / 0 / 5 / true`. |
 | A10 | R7 | `c1` deposit tx1 5; `c1` withdrawal tx2 10 (rejected); `c1` dispute tx2; `c1` dispute tx99; `c1` resolve tx1; `c1` chargeback tx1 | All dispute-related rows are ignored (rejected withdrawal, unknown `tx`, deposit not under dispute). `5 / 0 / 5 / false`. |
 | A11 | R9 | `c1` deposit tx1 10; `c1` deposit tx2 5; `c1` dispute tx1; `c1` chargeback tx1; `c1` deposit tx3 20; `c1` withdrawal tx4 5 | Locked after the chargeback (`5 / 0 / 5 / true`). The deposit is accepted and the withdrawal is rejected. `25 / 0 / 25 / true`. |
 | A12 | R9 | `c1` deposit tx1 10; `c1` deposit tx2 10; `c1` dispute tx1; `c1` dispute tx2; `c1` chargeback tx1; `c1` resolve tx2 | Dispute-related rows still work on a locked account. After the chargeback: `0 / 10 / 10 / true`. After the resolve: `10 / 0 / 10 / true`. |
 | A13 | R2, R9 | A1 rows, then `c1` deposit tx3 150; `c1` withdrawal tx4 10 | The deposit repays the debt on the locked account: `50 / 0 / 50 / true`. The withdrawal is rejected and the lock stays. |
+| A14 | R2, R5 | `c1` deposit tx1 100; `c1` dispute tx1; `c1` resolve tx1; `c1` withdrawal tx2 100; `c1` dispute tx1; `c1` chargeback tx1 | After the resolve and withdrawal: `0 / 0 / 0 / false`. The second dispute is recorded: `-100 / 100 / 0 / false`. The chargeback records the debt and locks: `-100 / 0 / -100 / true`. |
+| A15 | R10 | `c1` deposit tx1 10, then 1,000,000 rows that are each ignored (for example `c2` dispute tx1) | `c1` stays `10 / 0 / 10 / false`; no account for `c2`. stderr has at most 100 detailed entries, one suppression notice, and a summary that counts all 1,000,000 ignored rows. |
+| A16 | R10 | Any A1 to A14 input, run with stderr closed or failing on write | The run completes without a panic, stdout has the same CSV as with a working stderr, and the exit code is unchanged. |
 
 ### Invariants
 
@@ -138,7 +151,7 @@ The `Rule` column refers to the rules R1 to R9 of [ADR-0006](decisions/0006-disp
 | I1 | all | `total = available + held` for every account after every row |
 | I2 | R6, R9 | `locked` never goes from `true` back to `false` |
 | I3 | R3 to R8 | A rejected or ignored row leaves every account and every transaction state unchanged. The only exception is that a rejected withdrawal still creates a zero-balance account for an unseen client (R8). |
-| I4 | R2, R4 | `held` equals the sum of the amounts of the deposits currently in `Disputed` |
+| I4 | R2, R4, R5 | `held` equals the sum of the amounts of the deposits currently in `Disputed` |
 | I5 | R1 | Only deposits ever reach `Disputed`, `Resolved`, or `ChargedBack` |
 
 ## 7. Given assumptions
