@@ -28,14 +28,23 @@ cargo run -- transactions.csv > accounts.csv # run
 cargo test                                   # all tests
 cargo fmt --all --check                      # formatting
 cargo clippy --all-targets -- -D warnings    # lints, warnings are errors
+cargo deny check                             # advisories, licenses, sources
 cog verify "<commit message>"                # validate a commit message
 ```
 
-Before declaring a task done, run `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`, and fix any failure. CI exists but is manual-only ([ADR-0005](docs/decisions/0005-toolchain-and-manual-ci.md)), so local checks are the gate.
+Before declaring a task done, run `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`, and fix any failure. If `Cargo.toml` or `Cargo.lock` changed, also run `cargo deny check`. CI exists but is manual-only ([ADR-0005](docs/decisions/0005-toolchain-and-manual-ci.md)), so local checks are the gate.
 
 ## Toolchain
 
-Rust stable, edition 2024, pinned via `rust-toolchain.toml` (includes `rustfmt` and `clippy`).
+Rust stable, edition 2024, pinned via `rust-toolchain.toml` (includes `rustfmt` and `clippy`). `rust-version` is 1.85; do not raise it without a reason ([ADR-0012](docs/decisions/0012-dependencies-and-safety-policy.md)).
+
+## Dependencies and safety
+
+Follow [ADR-0012](docs/decisions/0012-dependencies-and-safety-policy.md):
+
+- Do not add, replace, or remove a dependency without a new ADR. Prefer the standard library.
+- No `unsafe`, no `unwrap`/`expect`/`panic!`/indexing outside tests, no floats, no unchecked arithmetic, no `as` casts, no `println!`/`eprintln!`. Clippy enforces all of these.
+- Never use `#[allow]`. If an exception is truly needed, use `#[expect(lint, reason = "...")]` at the narrowest scope.
 
 ## Commits, branches, PRs
 
@@ -53,5 +62,6 @@ docs/requirements.md behavior contract
 docs/decisions/      architecture decision records (MADR)
 .github/             PR template, manual-only CI workflow
 cog.toml             commit convention and git hooks (cocogitto)
+deny.toml            supply-chain policy (cargo-deny)
 rust-toolchain.toml  toolchain pin
 ```
