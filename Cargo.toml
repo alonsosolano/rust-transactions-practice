@@ -2,5 +2,7 @@
 name = "rust-transactions-practice"
 version = "0.1.0"
 edition = "2024"
+# Minimum for edition 2024. Revisit when dependencies are added.
+rust-version = "1.85"
 
 [dependencies]

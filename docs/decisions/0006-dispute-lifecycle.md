@@ -17,7 +17,7 @@ What are the exact states of a disputable transaction, which transitions are leg
 * The platform must be protected from its users. Every rule is chosen to close a gap, not to be lenient.
 * The ledger must tell the truth. No rule may hide a loss, and `total = available + held` must always hold.
 * Upstream rows can be duplicated, replayed, or wrong. Ignoring them must be safe and noisy, never silent.
-* Illegal transitions should be unrepresentable in the type system where practical ([requirements §7](../requirements.md)).
+* Illegal transitions should be unrepresentable in the type system where practical ([requirements §8](../requirements.md)).
 * Every rule must map to a testable scenario in [requirements §6](../requirements.md).
 
 ## Considered Options
@@ -133,6 +133,6 @@ Standard controls that the input format cannot express. Each one lists what the 
 
 ## More Information
 
-* Answers the open questions about withdrawal disputes, cross-client references, re-dispute, negative `available`, and locked accounts in [requirements §9](../requirements.md). Duplicate `tx` IDs on deposits and withdrawals, malformed rows, and amount rounding are decided elsewhere.
+* Answers the open questions about withdrawal disputes, cross-client references, re-dispute, negative `available`, and locked accounts in [requirements §10](../requirements.md). Duplicate `tx` IDs on deposits and withdrawals, malformed rows, and amount rounding are decided elsewhere.
 * Industry references: [Regulation E error resolution, 12 CFR 1005.11](https://www.ecfr.gov/current/title-12/chapter-X/part-1005/subpart-A/section-1005.11) and [Nacha rules on unauthorized return reasons](https://www.nacha.org/rules/differentiating-unauthorized-return-reasons).
 * Tracked by issue LYA-41 (D3). The attack catalog (D8) and the dispute implementation (E4) build on the scenarios in requirements §6.

@@ -2,6 +2,8 @@
 
 Behavior contract for the transaction engine. Written for this repo from the project brief; any interpretation beyond what is stated here must be recorded as an ADR.
 
+**Precedence:** where the prose of the brief is inconsistent, the described input and output file formats take precedence over the prose.
+
 ## 1. Command-line interface
 
 ```sh
@@ -12,6 +14,16 @@ cargo run -- transactions.csv > accounts.csv
 - Account state is written to **stdout** as CSV. Nothing else may go to stdout.
 - Errors and diagnostics go to stderr.
 - The interface is checked by automated tests, so it must not change.
+
+### How the submission is evaluated
+
+1. **Automated gate first.** The binary is run against a set of sample inputs and its output is compared with the expected output. Only if this passes does manual review happen.
+2. **Manual review** then covers everything else (see section 8).
+
+Consequences:
+
+- Correct output through the exact CLI above is the top priority; any other interface, flag, or entry point is ignored by reviewers.
+- Nothing may be written to stdout except the output CSV, or the comparison fails.
 
 ## 2. Input
 
@@ -51,7 +63,7 @@ client,available,held,total,locked
 
 ## 4. Account model
 
-Each client has exactly one account, created the first time the client appears in the input.
+Each client has exactly one account, created by the first `deposit` or `withdrawal` row for that client, even if the withdrawal is rejected. Rows that are ignored never create an account ([ADR-0006](decisions/0006-dispute-lifecycle.md)).
 
 Invariants that must hold after every operation:
 
@@ -87,18 +99,24 @@ These are treated as upstream errors and skipped without failing the run. "Skipp
 
 Only a `deposit` or `withdrawal` row creates a client account, including a rejected withdrawal. Ignored rows never do.
 
-## 6. Given assumptions
+## 6. Threat model and invariants
 
-- One asset account per client; every operation targets that account.
-- Clients are identified only by their `u16` ID. No other profile data.
-- When a rule is ambiguous, choose the behavior a bank or ATM processor would choose, and document it as an ADR.
+Card and bank transfers can be reversed after the fact, which is good for consumers but exposes the processor to fraud. The motivating attack:
 
-### Dispute scenarios
+1. Deposit funds through a reversible payment method.
+2. Spend or withdraw those funds immediately.
+3. Dispute the original deposit and get it charged back, keeping what was withdrawn.
 
-Attacks (`A`) and invariants (`I`) that cover every rule R1 to R9 of [ADR-0006](decisions/0006-dispute-lifecycle.md). Rows are listed in input order; `c1`/`c2` are client IDs. Results are `available / held / total / locked`.
+The engine must behave like a cautious bank under this and similar abuse: it must never create money, never lose track of held funds, and must freeze an account once a chargeback happens.
 
-| ID | Rule | Input rows | Expected behavior |
-|----|------|------------|-------------------|
+This section is a living catalog. It will grow with more attack scenarios and invariants as decisions are made; each entry must be backed by at least one test (unit, sample CSV, or property-based).
+
+### Attack scenarios
+
+The `Rule` column refers to the rules R1 to R9 of [ADR-0006](decisions/0006-dispute-lifecycle.md). Rows are listed in input order; `c1`/`c2` are client IDs. Results are `available / held / total / locked`.
+
+| ID | Rule | Scenario (input rows) | Expected behavior |
+|----|------|-----------------------|-------------------|
 | A1 | R2 | `c1` deposit tx1 100; `c1` withdrawal tx2 100; `c1` dispute tx1; `c1` chargeback tx1 | After the dispute: `-100 / 100 / 0 / false`. After the chargeback: `-100 / 0 / -100 / true`. The debt stays visible. |
 | A2 | R2 | `c1` deposit tx1 100; `c1` withdrawal tx2 100; `c1` dispute tx1; `c1` withdrawal tx3 10; `c1` resolve tx1 | The withdrawal is rejected while `available` is negative (`-100 / 100 / 0 / false`). The resolve restores `0 / 0 / 0 / false`. |
 | A3 | R1 | `c1` deposit tx1 100; `c1` withdrawal tx2 40; `c1` dispute tx2; `c1` resolve tx2; `c1` chargeback tx2 | All three rows on the withdrawal are ignored. Result: `60 / 0 / 60 / false`. |
@@ -112,13 +130,24 @@ Attacks (`A`) and invariants (`I`) that cover every rule R1 to R9 of [ADR-0006](
 | A11 | R9 | `c1` deposit tx1 10; `c1` deposit tx2 5; `c1` dispute tx1; `c1` chargeback tx1; `c1` deposit tx3 20; `c1` withdrawal tx4 5 | Locked after the chargeback (`5 / 0 / 5 / true`). The deposit is accepted and the withdrawal is rejected. `25 / 0 / 25 / true`. |
 | A12 | R9 | `c1` deposit tx1 10; `c1` deposit tx2 10; `c1` dispute tx1; `c1` dispute tx2; `c1` chargeback tx1; `c1` resolve tx2 | Dispute-related rows still work on a locked account. After the chargeback: `0 / 10 / 10 / true`. After the resolve: `10 / 0 / 10 / true`. |
 | A13 | R2, R9 | A1 rows, then `c1` deposit tx3 150; `c1` withdrawal tx4 10 | The deposit repays the debt on the locked account: `50 / 0 / 50 / true`. The withdrawal is rejected and the lock stays. |
-| I1 | all | any stream | `total = available + held` after every row. |
-| I2 | R2, R4 | any stream | `held` equals the sum of the amounts of deposits in `Disputed`. |
-| I3 | R9 | any stream | `locked` never reverts to `false`. |
-| I4 | R3 to R7 | any stream | An ignored row changes no balance and no transaction state. |
-| I5 | R1 | any stream | Only deposits ever reach `Disputed`, `Resolved`, or `ChargedBack`. |
 
-## 7. Quality goals
+### Invariants
+
+| ID | Rule | Invariant |
+|----|------|-----------|
+| I1 | all | `total = available + held` for every account after every row |
+| I2 | R6, R9 | `locked` never goes from `true` back to `false` |
+| I3 | R3 to R8 | A rejected or ignored row leaves every account and every transaction state unchanged. The only exception is that a rejected withdrawal still creates a zero-balance account for an unseen client (R8). |
+| I4 | R2, R4 | `held` equals the sum of the amounts of the deposits currently in `Disputed` |
+| I5 | R1 | Only deposits ever reach `Disputed`, `Resolved`, or `ChargedBack` |
+
+## 7. Given assumptions
+
+- One asset account per client; every operation targets that account.
+- Clients are identified only by their `u16` ID. No other profile data.
+- When a rule is ambiguous, choose the behavior a bank or ATM processor would choose, and document it as an ADR.
+
+## 8. Quality goals
 
 Listed in the order reviewers will weigh them when the output is already correct.
 
@@ -128,13 +157,13 @@ Listed in the order reviewers will weigh them when the output is already correct
 4. **Resource use**: stream the input instead of loading it all into memory. Transaction IDs span the full `u32` range, so per-transaction state must be sized with that in mind. Keep the design compatible with a future where the engine runs inside a server processing many concurrent input streams.
 5. **Maintainability**: clean, readable code is preferred over clever or micro-optimized code. Reviewers read the code without the author present, so the README must explain the design, the assumptions, and how correctness was verified.
 
-## 8. Deliverable constraints
+## 9. Deliverable constraints
 
 - A plain crate created with `cargo new` / `cargo init`, buildable with `cargo build` and runnable with `cargo run`.
 - Published as a public GitHub repository.
-- Dependencies limited to common, well-maintained crates (for example `serde` and `csv`).
+- Dependencies limited to common, well-maintained crates that we consider secure (for example `serde` and `csv`). Every dependency must have a stated reason, recorded in an ADR, covering why it is needed and why it is trusted (maintenance, adoption, no `unsafe`-heavy or unvetted transitive dependencies).
 
-## 9. Open questions
+## 10. Open questions
 
 Not answered by the brief. Each must be decided in an ADR before or while implementing it.
 

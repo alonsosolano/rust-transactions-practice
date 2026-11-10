@@ -1,5 +1,9 @@
 /target
 
+# Local run input/output in the repo root. Committed sample data lives under tests/.
+/transactions.csv
+/accounts.csv
+
 # The original exercise statement must never be committed (ADR-0001).
 *.pdf
 
