@@ -37,10 +37,11 @@ The choices below were decided one by one. Each lists the options considered and
 7. **Exit code when rows were skipped:** `0`, or a distinct non-zero code.
 8. **Record size:** bounded with a fatal error, or unbounded.
 9. **Error types:** hand-written enums, `thiserror` plus `anyhow`, or `Box<dyn Error>`.
+10. **Malformed quoting:** strict detection on line-delimited records, the lenient parse of the `csv-core` parser, or no quoting at all.
 
 ## Decision Outcome
 
-Chosen options: skip malformed rows with a diagnostic, strict fields, the amount on dispute-related rows is ignored, the first deposit or withdrawal binds a `tx` ID even when rejected, fail closed on file-level errors, a `sysexits.h` subset, exit `0` when the run completes, a bounded record size, and typed error enums.
+Chosen options: skip malformed rows with a diagnostic, strict fields, the amount on dispute-related rows is ignored, the first deposit or withdrawal binds a `tx` ID even when rejected, fail closed on file-level errors, a `sysexits.h` subset, exit `0` when the run completes, a bounded record size, typed error enums, and strict quoting on line-delimited records.
 
 The line between the two halves is simple: **a problem confined to one row skips that row; a problem that makes the file or the run untrustworthy stops the run.**
 
@@ -69,11 +70,12 @@ Every row ends in exactly one class, and every run ends in success or one fatal 
 | V6 | The first `deposit` or `withdrawal` row that is **applied or rejected** binds its `tx` ID for the rest of the run. Any later `deposit` or `withdrawal` with the same ID is **ignored** as a duplicate, whatever its client, type, or amount. Invalid and ignored rows never bind an ID, because they never became a transaction. | `tx` is a globally unique transaction ID ([requirements §2](../requirements.md)), not an idempotency key: the input has no retry semantics, so a reused ID is an upstream uniqueness violation, not a retry, and the engine does not replay the earlier result. Ledgers with unique transfer IDs, such as TigerBeetle, refuse a reused ID and keep it reserved even after a declined transfer. First-writer-wins also means no later row can overwrite a stored deposit or reset its dispute state. |
 | V7 | **File-level problems are fatal** (see the [table](#condition-table)): bad arguments, an input that cannot be opened or read, a missing or wrong header, a record over the size limit, and a failed write to stdout. The run **fails closed**: stdout stays empty and the exit code is non-zero. | When the header is wrong or a quote is unbalanced, the engine no longer knows what each byte means. Data loaders default to stopping on such errors, and a partial ledger printed as if complete would be worse than none. |
 | V8 | The header must have exactly the four names `type`, `client`, `tx`, `amount`, in that order, after trimming whitespace, case-sensitive. A UTF-8 byte order mark before it is accepted. An empty file has no header and is fatal. A file with only the header is valid and prints only the output header. | A column order the engine does not expect would read an amount as a `tx` without any error. Checking the header once is the cheapest way to rule that out. |
-| V9 | A record longer than `MAX_RECORD_BYTES` (one named constant, 4 KiB) is **fatal**. The limit is enforced before the record is buffered, so memory per record is bounded. | A valid row is under 100 bytes. A longer record means an unbalanced quote or a hostile file, after which row boundaries are unknown, so the run cannot safely skip ahead. Python's `csv` module uses the same kind of limit and raises an error. |
+| V9 | A line longer than `MAX_RECORD_BYTES` (one named constant, 4 KiB) is **fatal**. The limit is enforced before the line is buffered, so memory per record is bounded. | A valid row is under 100 bytes, so a longer line means a hostile file or one that does not follow this schema. Python's `csv` module uses the same kind of limit and raises an error. Quoting problems do not depend on this limit; V14 detects them at any length. |
 | V10 | Exit codes: `0` when the run completes, even if rows were rejected or ignored; `64` for a usage error; `65` for invalid file data; `66` for an input that cannot be opened; `74` for an I/O error while reading input or writing stdout. A panic exits with Rust's `101` and is always a bug. | These are the matching `sysexits.h` values, the convention the Rust CLI book recommends. Every skipped row is already counted on stderr, and a non-zero code on a completed run could make callers discard a correct output. |
 | V11 | Diagnostics for invalid rows use the ADR-0006 R10 budget and summary: same cap, same counters, one reason code each. Any input echoed to stderr is **escaped** (control characters, quotes, and non-ASCII bytes are written as escapes) and truncated, so each diagnostic is exactly one line. A fatal error writes one escaped line naming the condition and, when known, the input line number. | OWASP asks to log validation failures and to sanitize logged data against CR/LF and delimiter injection (CWE-117). Escaping also stops ANSI sequences in the input from rewriting the operator's terminal. |
 | V12 | Errors are **typed enums**: a closed set of row reasons in the library (which the summary counts) and one fatal error enum in `main` that maps each variant to its exit code. `main` returns `std::process::ExitCode`, not `Result`. No error is erased into `anyhow` or `Box<dyn Error>`. Whether `thiserror` derives the `Display` code is decided by D7. | Exit codes and per-reason counts need to match on the error kind. A `main` that returns `Result` prints the `Debug` form and always exits with `1`. |
 | V13 | No input reaches a panic: input is handled through `Result` only, stdout is written with `write!` and an explicit `flush` whose errors map to `74`, and `println!` and `eprintln!` are not used (both panic on a failed write). The lint policy that enforces this is decided by D7. | A panic on a closed pipe or bad input would crash the run, which [requirements §8](../requirements.md) forbids. |
+| V14 | Records are **line-delimited** (`\n` or `\r\n`), and quoting is **strict**. After trimming, a field is either unquoted and contains no `"`, or quoted: `"`, content that contains no `"`, then a closing `"`, with only whitespace between the closing quote and the next `,` or the end of the line. The content is trimmed again and then checked like an unquoted field. Commas inside a quoted field do not split it. Any other `"` in a terminated line (a bare quote such as `1"0`, text after the closing quote such as `"1"0`, or a doubled quote `""`) makes the row **invalid** (`malformed_quote`). A line that **ends inside an open quoted field** is **fatal** (exit `65`), including on the last line of the file. | Valid fields never contain a quote, comma, or line break, so this subset of [RFC 4180](https://www.rfc-editor.org/rfc/rfc4180) accepts every quoted form a valid row can take. Go's `encoding/csv` rejects bare and extraneous quotes by default (`ErrBareQuote`, `ErrQuote`). The `csv-core` parser is lenient by design and never reports an error, so `deposit,1,1,"5` would read as amount `5` and `"1"0` as `10`. A malformed quote inside a terminated line leaves row boundaries certain, so only that row is skipped. An unterminated quote does not: under RFC 4180 the field continues onto the following lines, so the engine cannot tell rows from field content, and it stops instead of guessing. |
 
 ### Condition table
 
@@ -86,8 +88,10 @@ Exit code `0` means the run completed and stdout has the full output CSV. Every 
 | I/O error while reading the input | Fatal | OS error and line number | 74 |
 | Empty file (no header) | Fatal | "missing header" | 65 |
 | Header other than `type,client,tx,amount` | Fatal | Expected and actual header (escaped) | 65 |
-| Record longer than `MAX_RECORD_BYTES` (for example an unbalanced quote) | Fatal | Line number where the record starts | 65 |
+| Line longer than `MAX_RECORD_BYTES` (V9) | Fatal | Line number | 65 |
+| Line ends inside an open quoted field, including the last line of the file (V14) | Fatal | Line number where the quoted field opens | 65 |
 | Write to stdout fails (closed pipe, full disk) | Fatal | OS error | 74 |
+| Bare quote, text after a closing quote, or doubled quote in a terminated line (V14) | Ignored, invalid | Diagnostic, reason `malformed_quote` | 0 |
 | Wrong field count (V2) | Ignored, invalid | Diagnostic, reason `field_count` | 0 |
 | Unknown or miscased `type` (V3) | Ignored, invalid | Diagnostic, reason `unknown_type` | 0 |
 | `client` not digits or out of `u16` range (V4) | Ignored, invalid | Diagnostic, reason `invalid_client` | 0 |
@@ -107,8 +111,10 @@ Reason codes are named here for clarity; the code may spell them differently as 
 ### Parsing details
 
 * Fields are trimmed of surrounding ASCII whitespace before every check ([requirements §2](../requirements.md)). Inner whitespace stays and makes the field invalid.
-* Standard CSV quoting ([RFC 4180](https://www.rfc-editor.org/rfc/rfc4180)) is accepted, so `"deposit"` is `deposit`. Valid input never needs quotes.
-* Empty lines are not rows: the CSV parser skips them without a diagnostic. A line holding only whitespace is a row with one field and is invalid under V2.
+* Simple quoting is accepted under V14, so `"deposit"` is `deposit` and `" 2.5 "` is `2.5`. Valid input never needs quotes. Quoted fields that span lines, which RFC 4180 allows, are not supported: no valid field contains a line break.
+* Quote checks run before field checks, so a row with a malformed quote always reports `malformed_quote`, whatever else is wrong with it.
+* The reader must implement V14 itself or add a strict check in front of a CSV crate. The `csv` crate alone does not satisfy V14, because `csv-core` accepts malformed quoting without an error. Which of the two is used is decided by D7.
+* Empty lines are not rows: they are skipped without a diagnostic. A line holding only whitespace is a row with one field and is invalid under V2.
 * Data rows are read as bytes, not as UTF-8 strings. Every valid field is ASCII, so invalid UTF-8 in a data row simply fails the field check where it appears (V1) instead of aborting the run.
 * A data row equal to the header (for example two files concatenated) has the type `type` and is invalid under V3.
 * The input path is taken as an `OsString`, so a non-UTF-8 path works. The single argument is always a path: `-h`, `--help`, and `-` are file names like any other.
@@ -116,7 +122,7 @@ Reason codes are named here for clarity; the code may spell them differently as 
 ### Consequences
 
 * Good, because a single bad row costs one diagnostic and one count, while every other client is still processed.
-* Good, because the engine never builds a ledger from a file it cannot parse with certainty: header problems, unbalanced quotes, and read errors stop the run before anything reaches stdout.
+* Good, because the engine never builds a ledger from a file it cannot parse with certainty: header problems, unterminated quotes, and read errors stop the run before anything reaches stdout, and no malformed quote is ever read as a value.
 * Good, because a stored deposit can never be overwritten or reset by a later row with the same `tx`, which closes the "reuse the ID after a chargeback" path (A28).
 * Good, because exit codes say why a run failed, and a script can tell a usage mistake (`64`) from bad data (`65`) and from an environment problem (`66`, `74`).
 * Good, because diagnostics stay one line each, so hostile input cannot forge log entries or terminal output.
@@ -124,13 +130,15 @@ Reason codes are named here for clarity; the code may spell them differently as 
 * Bad, because strict parsing refuses forms a lenient upstream might send, such as `Deposit` or `+7`. Accepted for the same reason as ADR-0007: loosening later is compatible.
 * Bad, because rejected withdrawals must be remembered to detect duplicates, so withdrawals now take per-transaction state (an ID marker, not a lifecycle state). In the worst case that is up to 2^32 IDs; the storage layout (for example a set of IDs or a 512 MiB bitmap) is left to the implementation and its resource analysis.
 * Neutral, because a run that completes exits `0` even if every row was skipped. Callers that need a stricter gate read the end-of-run summary on stderr. A configurable error budget would need an optional flag and a new ADR.
+* Bad, because a file that uses RFC 4180 quoting beyond simple fields (multi-line quoted fields, escaped `""`) is refused, by row or as a whole. Accepted: no valid row needs either, and a lenient parse is what let `"1"0` become `10`.
 * Neutral, because a failed stdout write may leave partial output behind. The exit code `74` is the signal; output is written only after all input is processed, so input errors can never cause partial output.
 
 ### Confirmation
 
-* Scenarios A27 to A35 and invariants I3, I11, and I12 in [requirements §6](../requirements.md) cover duplicates, invalid rows, ignored amounts on dispute-related rows, diagnostics escaping, and every fatal condition. They are acceptance criteria for the implementation until the tests exist.
+* Scenarios A27 to A37 and invariants I3, I11, and I12 in [requirements §6](../requirements.md) cover duplicates, invalid rows, malformed quoting, ignored amounts on dispute-related rows, diagnostics escaping, and every fatal condition. They are acceptance criteria for the implementation until the tests exist.
 * Parser unit tests cover every row-level reason in the condition table, including `Deposit`, `+1`, `65536` as a client, `4294967296` as a `tx`, and 2 and 5 fields. A further test checks that a dispute with an amount, including an unparsable one, has the same effect as the same dispute without it.
 * Integration tests run the binary for each fatal condition and check the exit code, that stdout is empty, and that stderr has exactly one error line.
+* Reader unit tests cover V14 with `deposit,1,1,"5` as the last line (fatal), the same line followed by more rows (fatal, no later row applied), `deposit,1,1,"1"0`, `deposit,1,1,1"0`, and `deposit,1,1,""5""` (each `malformed_quote`), and `"deposit",1,1," 2.5 "` and `deposit,1,1,"1,000"` (valid quoting; the second fails as `invalid_amount`).
 * A fuzz or property-based test feeds arbitrary bytes to the reader and checks that the run never panics, that memory per record stays under the limit, and that every outcome is either exit `0` with a valid CSV or a fatal exit code with empty stdout.
 * Review check: no `unwrap`, `expect`, indexing, `println!`, or `eprintln!` on any input or output path, and every fatal error variant maps to exactly one exit code.
 
@@ -178,8 +186,14 @@ Reason codes are named here for clarity; the code may spell them differently as 
 
 ### Record size
 
-* **Bounded, fatal (chosen).** Good, because memory per record is constant whatever the input. Good, because an unbalanced quote stops the run instead of swallowing the rest of the file into one field. Bad, because a file with a single absurdly long row cannot be processed at all.
-* **Unbounded.** Bad, because one unbalanced quote makes the whole remaining file a single record held in memory.
+* **Bounded, fatal (chosen).** Good, because memory per record is constant whatever the input. Bad, because a file with a single absurdly long row cannot be processed at all.
+* **Unbounded.** Bad, because a single long line, or a lenient parser that lets an open quote run on, can make one record as large as the rest of the file.
+
+### Malformed quoting
+
+* **Strict detection on line-delimited records (chosen).** Good, because no malformed quote is ever read as a value, whatever the record length. Good, because it matches strict CSV readers such as Go's `encoding/csv`, which reports `ErrBareQuote` and `ErrQuote` unless `LazyQuotes` is set. Good, because a malformed quote in a terminated line costs one row, while an unterminated one, where boundaries are lost, stops the run. Bad, because quoted fields cannot span lines, and the reader needs code or a pre-check of its own.
+* **Lenient parse (the `csv-core` default).** Good, because it needs no code. Bad, because it always produces some parse: `"1"0` becomes `10`, and an unterminated quote at the end of the file becomes a valid amount. That is exactly the misread V7 forbids.
+* **No quoting at all.** Good, because every `"` simply fails the field check and records are always lines. Bad, because an upstream that quotes every field, which many CSV writers can do, would have every row refused.
 
 ### Error types
 
@@ -194,11 +208,12 @@ Reason codes are named here for clarity; the code may spell them differently as 
   * Duplicate IDs: [TigerBeetle `create_transfers`](https://docs.tigerbeetle.com/reference/requests/create_transfers/) refuses a reused transfer `id` with `exists`, `exists_with_different_*`, or `id_already_failed`. For contrast, [Stripe idempotent requests](https://docs.stripe.com/api/idempotent_requests) replay the first result for a repeated key; that model needs idempotency keys, which this input does not have.
   * Data loading: Snowflake [`COPY INTO`](https://docs.snowflake.com/en/user-guide/data-load-transform) defaults to `ON_ERROR = ABORT_STATEMENT`; [BigQuery load jobs](https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/Job) default to `maxBadRecords = 0`. Both offer skip modes and error budgets.
   * Record limits: Python's [`csv.field_size_limit`](https://docs.python.org/3/library/csv.html) (default 128 KiB) raises an error on longer fields.
+  * Quoting: Go's [`encoding/csv`](https://pkg.go.dev/encoding/csv) reports `ErrBareQuote` and `ErrQuote` unless `LazyQuotes` is set. The [`csv-core` reader](https://docs.rs/csv-core/latest/csv_core/struct.Reader.html#rfc-4180) states that it can never return an error and prefers some parse over none.
   * Exit codes: [`sysexits(3)`](https://man.freebsd.org/cgi/man.cgi?query=sysexits) and the [Rust CLI book on exit codes](https://rust-cli.github.io/book/in-depth/exit-code.html).
   * Logging: the [OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html) on logging validation failures and preventing log injection.
   * Rust: [`println!`](https://doc.rust-lang.org/std/macro.println.html) panics when the write fails; integer `FromStr` accepts a leading `+` (checked locally: `"+42".parse::<u32>()` is `Ok(42)`). The `csv-core` parser strips a leading UTF-8 BOM and skips empty lines (checked in the `csv-core` 0.1.13 source).
 * Refines [ADR-0006](0006-dispute-lifecycle.md) without changing it: R8 is unchanged (duplicates are ignored rows and never create an account), and R10 now also covers invalid rows. Answers ADR-0006's note that a failed stdout write is handled by the error-handling decision (V7, V10), and the reporting question left open by [ADR-0007](0007-money-representation.md) M6.
 * Fills in what [ADR-0008](0008-locked-account-policy.md) L7 and [ADR-0009](0009-output-format.md) O10 leave to this decision: the reason codes (`account_locked` and `insufficient_funds` are counted apart), the fatal conditions, and their exit codes. A fatal error leaves stdout empty, as O10 requires.
 * Answers the open questions on malformed rows and duplicate `tx` IDs in [requirements §10](../requirements.md). Dependencies (`csv`, `thiserror`) and lint policy are decided by D7 (LYA-45); the attack catalog by D8 (LYA-46); the CLI entry point is built in E1 (LYA-49).
-* Revisit if an upstream needs case-insensitive types or partial disputes (the amount on dispute-related rows would then need a meaning and validation), if an error budget becomes necessary, or if the CLI ever gains optional flags.
+* Revisit if an upstream needs case-insensitive types or partial disputes (the amount on dispute-related rows would then need a meaning and validation), if an error budget becomes necessary, if an upstream needs multi-line quoted fields, or if the CLI ever gains optional flags.
 * Tracked by issue LYA-43 (D5).
