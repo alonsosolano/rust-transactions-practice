@@ -16,7 +16,7 @@ How is the crate split into modules, how does input flow through the engine, whi
 
 * Correct output through the fixed CLI comes first ([requirements §1](../requirements.md)). Nothing in the design may write to stdout except the final CSV.
 * Memory must grow with the state the rules require, not with the input. Rows must be streamed.
-* Hostile input must not be able to degrade the data structures (for example by forcing hash collisions) or make one row cost unbounded work.
+* Hostile input should not be able to degrade the data structures cheaply (for example by flooding a hash table with colliding keys), and the cost of a row should be constant on average: work that grows with stored state, such as growing a table, must be amortized over many rows.
 * Invalid states should be unrepresentable where practical ([requirements §8](../requirements.md)), and every rule of [ADR-0006](0006-dispute-lifecycle.md) and [ADR-0007](0007-money-representation.md) should live in exactly one module.
 * The engine must be testable without the CLI, files, or processes.
 * The core must move into a thread or an async task unchanged when a server is built.
@@ -30,17 +30,17 @@ The choices below were decided one by one. Each lists the options considered and
 
 1. **Crate layout:** a single binary, or a library plus a thin binary.
 2. **Where I/O happens:** inside the engine, or only in adapter modules around an I/O-free core.
-3. **Input flow:** load the whole file, deserialize one new record per row, or reuse one record buffer per run.
+3. **Input flow:** load the whole file, deserialize one new record per row, or reuse one line buffer per run.
 4. **Field parsing:** serde typed deserialization of each column, or raw fields validated by our own code.
 5. **Transaction store:** `HashMap<TxId, _>`, `BTreeMap<TxId, _>`, a dense array indexed by `tx`, or external storage.
 6. **What the store records:** deposits only, deposits plus a separate set or bitmap of withdrawal IDs, or one record for every bound ID.
-7. **Hash function:** the standard library default (SipHash 1-3 with random keys), or a faster non-keyed hash (FxHash, ahash).
+7. **Hash function:** the standard library default (SipHash 1-3 with random keys), the faster unkeyed FxHash, or the faster keyed aHash.
 8. **Account store:** `HashMap<ClientId, Account>`, `BTreeMap<ClientId, Account>`, or a fixed array of 65,536 slots.
 9. **Concurrency in the CLI:** single-threaded, or a separate reader or parser thread.
 
 ## Decision Outcome
 
-Chosen options: a library with a thin binary, an I/O-free core, one reused record buffer, raw fields validated by our own code, a `HashMap` transaction store with the standard hasher that holds one record for every `tx` ID bound under ADR-0010 V6, a `BTreeMap` account store, and a single-threaded CLI. Together they keep memory proportional to stored state, keep each rule in one module, and leave the core ready for a server.
+Chosen options: a library with a thin binary, an I/O-free core, one reused line buffer, raw fields validated by our own code, a `HashMap` transaction store with the standard hasher that holds one record for every `tx` ID bound under ADR-0010 V6, a `BTreeMap` account store, and a single-threaded CLI. Together they keep memory proportional to stored state, keep each rule in one module, and leave the core ready for a server.
 
 ### Rules
 
@@ -48,7 +48,7 @@ Chosen options: a library with a thin binary, an I/O-free core, one reused recor
 |---|------|------------------------|
 | S1 | The crate is a **library** (`src/lib.rs`) plus a **thin binary** (`src/main.rs`). The binary only reads the argument, opens the file, calls the library's `run` function with the file, locked stdout, and stderr, and maps the result to an `ExitCode` ([ADR-0010](0010-input-validation-and-errors.md) V10, V12). | Tests drive the whole pipeline in memory, and the binary has almost nothing to get wrong. |
 | S2 | The **domain modules** (`amount`, `transaction`, `account`, `store`, `engine`) perform no I/O and do not depend on `csv` or serde. Only the **adapter modules** (`input`, `output`, `diagnostics`) read or write. | The rules can be tested exhaustively without files, and the same core can run behind a socket instead of a file. |
-| S3 | Input is **streamed**: the `input` adapter reads one line at a time into one reused buffer, and refuses a line longer than `MAX_RECORD_BYTES` before buffering it ([ADR-0010](0010-input-validation-and-errors.md) V9). Input memory is bounded by that constant, never by the file. Rows are never collected. The header is checked once (V8); after that, fields are positional. Quoting follows V14, so a CSV crate, if D7 adopts one, sits behind a strict check. | Memory and time per row are constant, and the reuse avoids one allocation per row, as the `csv` tutorial recommends. |
+| S3 | Input is **streamed**: the `input` adapter reads one line at a time into one reused buffer, and refuses a line longer than `MAX_RECORD_BYTES` before buffering it ([ADR-0010](0010-input-validation-and-errors.md) V9). Input memory is bounded by that constant, never by the file. Rows are never collected. The header is checked once (V8); after that, fields are positional. Quoting follows V14, so a CSV crate, if D7 adopts one, sits behind a strict check. | Input memory is constant, and the reuse avoids one allocation per row, as the `csv` tutorial recommends. |
 | S4 | Fields stay **raw byte slices** until one validating constructor in `input` turns a row into a typed `Transaction`, applying ADR-0010 V1 to V5 in column order. No serde or standard-library parser decides the grammar. | Default parsers define their own grammar: Rust's integer parser accepts `+5` as `5`, which V4 forbids. Reading bytes means invalid UTF-8 fails one field, not the run. One function owns what a valid row is, as `Amount` does for amounts (ADR-0007 M3). |
 | S5 | `Transaction` is an **enum with one variant per row type**. Only `Deposit` and `Withdrawal` carry an `Amount`. `ClientId` and `TxId` are newtypes. | A dispute with an amount or a deposit without one cannot be constructed, and a client ID cannot be passed where a transaction ID is expected. |
 | S6 | The engine API is `Engine::apply(&mut self, Transaction) -> Result<(), Rejection>` plus an iterator over the accounts in ascending client order. `Rejection` is an enum with one variant per diagnostic reason, carrying its context (for example the owning client). The engine never writes diagnostics itself; the `run` loop passes each rejection to `diagnostics`. | The engine stays pure and deterministic, and every reason code of ADR-0010 is counted in the ADR-0006 R10 summary by an exhaustive match. |
@@ -118,10 +118,18 @@ sequenceDiagram
     participant output
     loop each row, one at a time
         run->>input: next row
-        input-->>run: Transaction, invalid row, or fatal error (ADR-0010)
-        run->>engine: apply(transaction)
-        engine-->>run: Ok, or Rejection
-        run->>diag: record rejection or invalid row
+        alt valid row
+            input-->>run: Transaction
+            run->>engine: apply(transaction)
+            engine-->>run: Ok, or Rejection
+            run->>diag: record the Rejection, if any
+        else invalid row (ADR-0010)
+            input-->>run: invalid row and its reason
+            run->>diag: record the invalid row
+        else fatal error (ADR-0010)
+            input-->>run: fatal error
+            Note over run: stop, stdout stays empty
+        end
     end
     run->>output: write accounts in client order
     run->>diag: write summary
@@ -185,7 +193,7 @@ For comparison, a deposit row is about 15 to 50 bytes of input, so the store cos
 
 Every `u32` ID stored once needs about 200 GiB, with a 300 GiB peak while the table grows, and an input file of at least about 100 GB. No in-memory layout makes this practical: even a dense array with no keys and no padding needs 2^32 × 11 bytes = 44 GiB, and it would cost that for a one-row file too. The engine is therefore sized for the number of transactions actually stored, not for the theoretical range.
 
-If memory runs out, the allocator aborts the process or the operating system ends it. Under S12 no output has been written at that point, so stdout is empty and the run never prints a partial account list. The exit status then comes from the abort or the signal, not from the ADR-0010 V10 table: like a killed process, running out of memory is a failure of the environment, and it is the one way a run can end outside the exit codes of invariant I12.
+If memory runs out while the input is being processed, the allocator aborts the process or the operating system ends it. Under S12 the output has not started at that point, so stdout is empty. The output phase itself allocates almost nothing, but a crash or a kill during it can still leave a partial CSV. Only exit `0` means stdout holds the full CSV ([ADR-0010](0010-input-validation-and-errors.md) V10), so a caller checks the exit status before using stdout. The exit status then comes from the abort or the signal, not from the ADR-0010 V10 table: like a killed process, running out of memory is a failure of the environment, and it is the one way a run can end outside the exit codes of invariant I12.
 
 #### Assumptions
 
@@ -196,9 +204,9 @@ If memory runs out, the allocator aborts the process or the operating system end
 
 #### Hostile input
 
-* Crafted `tx` IDs cannot force hash collisions, because the hash keys are random per process (S9).
+* Crafted `tx` IDs resist hash flooding: the hash keys are random per process (S9), so an attacker cannot compute colliding IDs in advance. Collisions still happen by chance, and the table absorbs them at expected constant cost.
 * A long line cannot grow a buffer: a line over `MAX_RECORD_BYTES` is fatal before it is buffered (ADR-0010 V9). A server needs the same cap per connection (see below).
-* Per-row work is bounded: one hash lookup, at most one tree lookup, and a fixed amount of checked arithmetic.
+* Per-row work is constant on average, not bounded for every row: one hash lookup or insert at expected constant cost, at most one tree lookup of a few node visits, and a fixed amount of checked arithmetic. An insert that grows the transaction table rehashes every stored record, so a single row can cost work proportional to the stored state. Amortized over all inserts, the cost per row stays constant, which is how the Rust collections documentation states the cost of `HashMap::insert`. Input can trigger growth only by adding records, so the total growth work stays proportional to the number of records.
 
 ### Concurrency story
 
@@ -235,22 +243,22 @@ When one core is no longer enough, the clients are split into N shards. Each sha
 ```mermaid
 flowchart LR
     c["connections<br/>frame, parse, validate"] --> r{"route by client ID"}
-    r -->|deposit or withdrawal| reg["ID registry<br/>claim tx ID, partitioned by tx"]
-    reg -->|new ID| s1
-    reg -->|new ID| s2
-    r -->|dispute, resolve, chargeback| s1["shard 1<br/>Engine"]
-    r -->|dispute, resolve, chargeback| s2["shard 2<br/>Engine"]
+    r -->|every row of shard 1 clients| s1["shard 1<br/>Engine"]
+    r -->|every row of shard 2 clients| s2["shard 2<br/>Engine"]
+    s1 -.->|claim tx ID| reg["ID registry<br/>insert-if-absent, partitioned by tx"]
+    s2 -.->|claim tx ID| reg
 ```
 
-* **Routing:** every row goes to the shard of the client named in the row. A connection sends to each shard through one FIFO channel, so the rows of one client keep their order.
+* **Routing:** every row, of any type, goes to the shard of the client named in the row. A connection sends to each shard through one FIFO channel, so the rows of one client keep their order. No row type takes a separate path: a deposit that passed through an extra stage could be overtaken by its own dispute, which would then be ignored as unknown.
 * **Ordering contract:** the chronological order of [requirements §2](../requirements.md) becomes a per-client order. The rows of one client must arrive on one connection, or carry a per-client sequence number that the shard checks. Rows of different clients have no defined order between connections, and no rule depends on one.
-* **Cross-client references (R3):** a transaction lives in the shard of the client that owns it. A dispute naming another client is routed to that other client's shard, where the `tx` is unknown, so it is ignored without touching the owner's state. The rule holds by construction. The diagnostic can no longer name the owner, which ADR-0006 already allows (the owning client is named "when known").
-* **Global `tx` uniqueness:** shards cannot see each other's IDs. Deposits and withdrawals first claim their ID in a registry partitioned by `tx` (an insert-if-absent set), and only a new ID is routed to the client's shard. Under ADR-0010 V6 a rejected withdrawal keeps its claim. A row the shard ignores, such as one whose effect would overflow, must release it, because ignored rows never bind an ID. Invalid rows are refused by the connection before they reach the registry. An alternative is an upstream guarantee that ID ranges never overlap between clients, which removes the registry.
+* **Cross-client references (R3):** a transaction lives in the shard of the client that owns it, and each shard holds many clients. A dispute naming another client goes to that client's shard. If the owner is in a different shard, the `tx` is unknown there, so the row is ignored without touching the owner's state. Its diagnostic then reports an unknown transaction and cannot name the owner, which ADR-0006 already allows (the owning client is named "when known"). If both clients share the shard, the engine finds the transaction, and its unchanged ownership check (ADR-0006 R3) ignores the row. Routing is therefore not a security boundary: every shard keeps the R3 check, and its tests (A4, A5) still apply.
+* **Global `tx` uniqueness:** shards cannot see each other's IDs. Once a shard has validated a deposit or withdrawal and knows it would be applied or rejected, it claims the ID in a registry partitioned by `tx` (an atomic insert-if-absent) before it commits, as part of S7's validate-then-commit step. A failed claim makes the row an ADR-0010 V6 duplicate, which is ignored. Rows the shard ignores never claim, so no claim is ever released, and invalid rows never reach a shard. If two shards claim the same ID at the same time, one wins; rows of different clients have no defined order, so either result is valid. The claim adds a round trip to every deposit and withdrawal. An alternative is an upstream guarantee that ID ranges never overlap between clients, which removes the registry.
 * **Hot clients:** one very active client is limited to the throughput of its shard. TigerBeetle names hot accounts as the main reason it does not shard; stage 1 should be measured before stage 2 is built.
 
 #### Server-only concerns
 
 * **Framing limit:** each connection keeps the ADR-0010 V9 line cap (for example with `tokio_util::codec::LinesCodec::new_with_max_length`), because many connections share one process. Unlike in the CLI, an oversized line should end that connection only, not the whole server.
+* **Growth pauses:** in a single-writer engine, the row that grows a large table stalls every connection until the rehash ends. A server reserves capacity from the expected volume, or splits the store into several smaller tables so that each growth step is small.
 * **Durability:** the in-memory state is lost on a crash. A server journals each accepted input event before applying it and rebuilds state by replaying the journal, with periodic snapshots, as LMAX does.
 * **External storage:** the worst case above does not fit in memory. A server that must hold every ID moves the transaction store to an embedded key-value store on disk. Only the `store` module changes.
 * **Diagnostics:** the per-run bound of ADR-0006 R10 becomes a per-connection or per-period bound with structured logs.
@@ -258,14 +266,14 @@ flowchart LR
 ### Consequences
 
 * Good, because every rule lives in one domain module, and the domain modules can be tested without files, pipes, or processes.
-* Good, because memory grows only with stored deposits, stored withdrawals, and accounts. A file of a billion disputes on unknown IDs costs no more memory than an empty file.
+* Good, because memory grows only with bound `tx` IDs and accounts. A file of a billion disputes on unknown IDs costs no more memory than an empty file.
 * Good, because I1, I2, and I5 hold by construction, and I3 holds by the validate-then-commit structure of `apply`.
 * Good, because the account store already iterates in the order ADR-0009 O3 requires, so byte-identical output (I10) needs no sort step.
-* Good, because a crash or abort never leaves a partial CSV on stdout.
+* Good, because a run that stops before the output phase, on a fatal error or when memory runs out, leaves stdout empty. A crash or a failed write during the output phase can still leave a partial CSV, so only exit `0` means the CSV is complete (ADR-0010 V10).
 * Good, because the domain modules need no dependency, and the input adapter needs no serde derive: the header and fields are checked by our own code under ADR-0010. D7 decides whether a CSV crate sits behind the strict check.
 * Good, because the server story reuses the core unchanged: stage 1 needs only channels around one `Engine`, and stage 2 adds routing and an ID registry outside it.
 * Bad, because the full `u32` worst case needs about 200 GiB and cannot run on common hardware. Accepted: no in-memory layout fits it, and external storage is future work behind the `store` module.
-* Bad, because the standard hasher is slower than FxHash or ahash. Accepted for resistance to crafted IDs; E7 measures the cost, and the hasher is one type parameter.
+* Bad, because the standard hasher is slower than FxHash or aHash. Accepted for resistance to crafted IDs; E7 measures the cost, and the hasher is one type parameter.
 * Bad, because a `StoredTx` wastes 5 bytes of padding, and a withdrawal record keeps an amount no rule needs. Packing the layout or moving withdrawals to a smaller set would save memory at the cost of clarity. Both stay options for E7.
 * Neutral, because ADR-0010 V6 makes typical memory grow with every bound ID, including rejected withdrawals, not only with deposits. The worst case is unchanged (S10).
 * Neutral, because the account map uses a tree instead of a hash table. At 65,536 entries at most, the lookup is a few node visits, and ordered iteration comes for free.
@@ -275,7 +283,7 @@ flowchart LR
 * Unit tests for `engine`, `account`, and `store` run on typed `Transaction` values without any CSV.
 * Integration tests call `lib::run` with byte slices and vectors, covering the full pipeline without a process.
 * A compile-time assertion checks that `Engine` is `Send`.
-* A test with a large generated input checks that memory stays flat when the rows add no stored state (disputes on unknown IDs), and E7 compares the table above with measured peak memory.
+* A test with a large generated input checks that memory stays flat when the rows add no stored state (disputes on unknown IDs), and E7 compares the table above with measured peak memory and records the slowest single row on a large input, which shows the cost of table growth.
 * Review checks: no module in the domain group imports `csv`, serde, `std::io`, or `std::fs`; no `static mut`, `thread_local!`, or other global state; no wildcard arm in the transition match or in the summary match; nothing is written to stdout before all input is applied.
 
 ## Pros and Cons of the Options
@@ -303,7 +311,7 @@ flowchart LR
 
 ### Transaction store
 
-* **`HashMap` (chosen).** Good, because lookups are constant time and the memory per entry is close to the raw record size. Bad, because growth temporarily needs 1.5 times the table.
+* **`HashMap` (chosen).** Good, because lookups take expected constant time, inserts take amortized expected constant time, and the memory per entry is close to the raw record size. Bad, because each growth step rehashes every record at once and temporarily needs 1.5 times the table.
 * **`BTreeMap`.** Good, because it needs no hash function and grows without a resize peak. Bad, because every lookup visits several nodes, often a cache miss each for unsorted IDs, and the memory per entry is similar.
 * **Dense array indexed by `tx`.** Good, because lookup is one index. Bad, because it costs 44 to 64 GiB for any input, including a one-row file.
 * **External storage (embedded key-value store on disk).** Good, because the worst case fits. Bad, because it adds a large dependency and disk I/O for a CLI whose realistic inputs fit in memory. Kept as future work behind the `store` module.
@@ -317,13 +325,14 @@ flowchart LR
 
 ### Hash function
 
-* **Standard library default (chosen).** Good, because SipHash with random keys is the standard library's defense against hash flooding, and the IDs come from untrusted input. Good, because it needs no dependency. Bad, because it is slower than non-keyed hashes.
-* **FxHash or ahash.** Good, because they are faster. Bad, because FxHash is not designed to resist crafted keys, and both add a dependency. A keyed fast hash can replace the default later if E7 shows a need.
+* **Standard library default (chosen).** Good, because SipHash with random keys is the standard library's defense against hash flooding, and the IDs come from untrusted input. Good, because it needs no dependency. Bad, because it is slower than FxHash and aHash.
+* **FxHash.** Good, because it is among the fastest hashes for integer keys. Bad, because it is unkeyed: anyone can compute colliding IDs in advance and flood the table. Bad, because it adds a dependency.
+* **aHash.** Good, because it is faster than SipHash and keyed with random keys taken from the operating system, so it is designed to resist the same flooding. Bad, because it adds a dependency, and it is a non-cryptographic hash, while SipHash is a keyed pseudorandom function with more public analysis. It is the first candidate if E7 shows that the standard hasher is too slow.
 
 ### Account store
 
 * **`BTreeMap` (chosen).** Good, because memory follows the number of clients, iteration is in client order, and no hash function is involved. Neutral, because a lookup visits a few nodes.
-* **`HashMap`.** Good, because lookups are constant time. Bad, because its iteration order changes between runs, so the accounts must be sorted before printing to meet ADR-0009 O3.
+* **`HashMap`.** Good, because lookups take expected constant time. Bad, because its iteration order changes between runs, so the accounts must be sorted before printing to meet ADR-0009 O3.
 * **Fixed array of 65,536 slots.** Good, because a lookup is one index. Bad, because every run, and every shard in a server, pays about 3 MiB up front, and the output must skip empty slots.
 
 ### Concurrency in the CLI
@@ -335,7 +344,8 @@ flowchart LR
 
 * Industry references:
   * The [`csv` tutorial](https://docs.rs/csv/latest/csv/tutorial/index.html) on internal buffering ("Reading CSV"), reusing one record ("Amortizing allocations"), and borrowed fields ("Serde and zero allocation").
-  * The [Rust `HashMap` documentation](https://doc.rust-lang.org/std/collections/struct.HashMap.html) on the default SipHash 1-3 hasher and its resistance to HashDoS attacks, and the [SwissTable design notes](https://abseil.io/about/design/swisstables) behind its layout.
+  * The [Rust `HashMap` documentation](https://doc.rust-lang.org/std/collections/struct.HashMap.html) on the default SipHash 1-3 hasher and its resistance to HashDoS attacks, the [Rust collections performance table](https://doc.rust-lang.org/std/collections/index.html#performance), which lists `HashMap::insert` as expected and amortized constant time, and the [SwissTable design notes](https://abseil.io/about/design/swisstables) behind its layout.
+  * The [aHash documentation](https://docs.rs/ahash/latest/ahash/), which describes it as a keyed hash with keys from the operating system.
   * Martin Fowler's description of the [LMAX architecture](https://martinfowler.com/articles/lmax.html): a single-threaded business logic processor with parallel input and output stages and event-sourced recovery.
   * TigerBeetle's [performance notes](https://docs.tigerbeetle.com/concepts/performance/): single-threaded by design, because hot accounts make sharding a financial database hard.
   * The [`LinesCodec` documentation](https://docs.rs/tokio-util/latest/tokio_util/codec/struct.LinesCodec.html), which recommends a maximum line length for any codec exposed to untrusted input.
