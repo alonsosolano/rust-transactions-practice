@@ -14,6 +14,19 @@ cargo run -- transactions.csv > accounts.csv
 - Account state is written to **stdout** as CSV. Nothing else may go to stdout.
 - Errors and diagnostics go to stderr.
 - The interface is checked by automated tests, so it must not change.
+- The single argument is always a path; `-h`, `--help`, and `-` have no special meaning ([ADR-0010](decisions/0010-input-validation-and-errors.md)).
+
+### Exit codes
+
+Follow [ADR-0010](decisions/0010-input-validation-and-errors.md) V10. A fatal error writes one line to stderr and leaves stdout empty (a failed stdout write may leave partial output).
+
+| Code | Meaning |
+|------|---------|
+| `0`  | The run completed and stdout has the full output, even if rows were rejected or ignored |
+| `64` | Usage error: no argument or more than one |
+| `65` | Invalid file data: missing or wrong header, or a record longer than the size limit |
+| `66` | The input cannot be opened: not found, not readable, or a directory |
+| `74` | I/O error while reading the input or writing stdout |
 
 ### How the submission is evaluated
 
@@ -40,13 +53,25 @@ Parsing must tolerate:
 
 - Whitespace around fields and headers.
 - Any decimal precision up to 4 fractional digits (`1`, `1.0`, `1.2345`).
+- A UTF-8 byte order mark before the header, empty lines, `\r\n` line endings, and a whole field in double quotes (`"deposit"`, `" 2.5 "`).
+
+Validation follows [ADR-0010](decisions/0010-input-validation-and-errors.md):
+
+- The header must be exactly `type,client,tx,amount` after trimming, case-sensitive. A missing or different header is fatal (exit `65`).
+- A line longer than 4 KiB is fatal (exit `65`); memory per record is bounded.
+- Quoting is strict and records are lines. A line that ends inside an open quoted field is fatal (exit `65`), including the last line. Any other stray quote (`1"0`, `"1"0`, `""5""`) makes the row invalid.
+- A data row must have 4 fields, or 3 for `dispute`, `resolve`, and `chargeback`.
+- `type` is matched exactly and case-sensitively: `Deposit` is unknown.
+- `client` and `tx` are ASCII digits only, within `u16` and `u32`. A sign (`+7`) makes the row invalid; leading zeros are accepted.
+- A `deposit` or `withdrawal` needs a non-empty amount. On a `dispute`, `resolve`, or `chargeback`, any amount is ignored (not parsed or reported) and the row is processed normally.
+- A row that fails any of these checks is **invalid**: it is skipped with a diagnostic and the run continues (see §5).
 
 Amounts follow [ADR-0007](decisions/0007-money-representation.md):
 
 - Stored as exact fixed-point integers in units of `0.0001`. No floating point is used, and no amount is ever rounded or truncated.
 - Valid form: ASCII digits, optionally followed by `.` and more digits. Extra fractional digits beyond the fourth are accepted only if they are zeros (`1.23450`); leading zeros are accepted (`007.5`).
 - Valid range: `0.0001` to `1844674407370955.1615`.
-- Anything else makes the `deposit` or `withdrawal` row invalid: a sign (`-5`, `+5`), `.5`, `5.`, exponents (`1e3`), separators (`1_000`, `1,000`), zero, more than 4 non-zero fractional digits, or a value above the range. An invalid row never changes state and never creates an account. How it is reported is decided with the handling of malformed rows (§10).
+- Anything else makes the `deposit` or `withdrawal` row invalid: a sign (`-5`, `+5`), `.5`, `5.`, exponents (`1e3`), separators (`1_000`, `1,000`), zero, more than 4 non-zero fractional digits, or a value above the range. An invalid row never changes state and never creates an account. It is reported like any other skipped row ([ADR-0010](decisions/0010-input-validation-and-errors.md) V1, V11).
 
 Ordering:
 
@@ -95,7 +120,7 @@ Client 3's withdrawal is rejected but still opens a zero-balance account; client
 
 ## 4. Account model
 
-Each client has exactly one account, created by the first `deposit` or `withdrawal` row for that client, even if the withdrawal is rejected. Rows that are ignored never create an account ([ADR-0006](decisions/0006-dispute-lifecycle.md)). Neither do invalid rows: a withdrawal with an invalid amount is not a rejected withdrawal ([ADR-0007](decisions/0007-money-representation.md) M6).
+Each client has exactly one account, created by the first `deposit` or `withdrawal` row for that client, even if the withdrawal is rejected. Rows that are ignored never create an account ([ADR-0006](decisions/0006-dispute-lifecycle.md)). Neither do invalid rows: a withdrawal with an invalid amount is not a rejected withdrawal ([ADR-0007](decisions/0007-money-representation.md) M6). Neither does a `deposit` or `withdrawal` that reuses a `tx` ID ([ADR-0010](decisions/0010-input-validation-and-errors.md) V6).
 
 Invariants that must hold after every operation:
 
@@ -130,6 +155,10 @@ These are treated as upstream errors and skipped without failing the run. "Skipp
 - `resolve` or `chargeback` whose `tx` is not currently under dispute.
 - `withdrawal` on a locked account (rejected; balances unchanged), whatever the balance. The lock is checked before the funds check, so the reason is always "account locked" ([ADR-0008](decisions/0008-locked-account-policy.md) L3, L4). Deposits on a locked account are still accepted, so the client can repay a debt, and `dispute`, `resolve`, and `chargeback` behave as on an unlocked account (L2, L5).
 - Any row whose effect would overflow a balance ([ADR-0007](decisions/0007-money-representation.md) M7). Unreachable for valid input; kept as defense in depth.
+- Any invalid row (§2): wrong field count, unknown or miscased `type`, bad `client` or `tx`, a missing or invalid amount on a `deposit` or `withdrawal`, or a stray quote in a terminated line ([ADR-0010](decisions/0010-input-validation-and-errors.md) V1 to V5, V14).
+- `deposit` or `withdrawal` whose `tx` ID was already used by an earlier `deposit` or `withdrawal` that was applied or rejected, whatever its client, type, or amount. Invalid and ignored rows never use up an ID ([ADR-0010](decisions/0010-input-validation-and-errors.md) V6).
+
+Diagnostics escape any echoed input, so every entry is exactly one line ([ADR-0010](decisions/0010-input-validation-and-errors.md) V11).
 
 Only a `deposit` or `withdrawal` row creates a client account, including a rejected withdrawal. Ignored rows never do.
 
@@ -157,7 +186,7 @@ This section is a living catalog. It will grow with more attack scenarios and in
 
 ### Attack scenarios
 
-The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dispute-lifecycle.md), M1 to M8 of [ADR-0007](decisions/0007-money-representation.md), L1 to L7 of [ADR-0008](decisions/0008-locked-account-policy.md), and O1 to O10 of [ADR-0009](decisions/0009-output-format.md). Rows are listed in input order; `c1`/`c2` are client IDs. Results are `available / held / total / locked`.
+The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dispute-lifecycle.md), M1 to M8 of [ADR-0007](decisions/0007-money-representation.md), L1 to L7 of [ADR-0008](decisions/0008-locked-account-policy.md), O1 to O10 of [ADR-0009](decisions/0009-output-format.md), and V1 to V14 of [ADR-0010](decisions/0010-input-validation-and-errors.md). Rows are listed in input order; `c1`/`c2` are client IDs. Results are `available / held / total / locked`.
 
 | ID | Rule | Scenario (input rows) | Expected behavior |
 |----|------|-----------------------|-------------------|
@@ -187,6 +216,17 @@ The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dis
 | A24 | L1, L2, L5 | `c1` deposit tx1 10; `c1` dispute tx1; `c1` chargeback tx1; `c1` deposit tx2 50; `c1` dispute tx2; `c1` chargeback tx2 | Locked at `0 / 0 / 0 / true`. The deposit after the lock is applied (`50 / 0 / 50 / true`) and stays disputable (`0 / 50 / 50 / true`). Its chargeback returns the account to `0 / 0 / 0 / true`; the lock stays. |
 | A25 | L3, L4, L7, R7 | `c1` deposit tx1 10; `c1` deposit tx2 5; `c1` dispute tx1; `c1` chargeback tx1; `c1` withdrawal tx3 100; `c1` withdrawal tx4 1; `c1` dispute tx3 | Locked at `5 / 0 / 5 / true`. Both withdrawals are rejected with the reason "account locked", including tx3, which also lacks funds. The dispute on tx3 is ignored because a rejected withdrawal is never stored. `5 / 0 / 5 / true`. |
 | A26 | O1 to O9 | The example input in §3 | stdout is exactly the example output in §3, byte for byte: sorted rows, fixed 4-digit amounts, `-0.5000` for client 1, a zero-balance row for client 3, and no row for client 4. |
+| A27 | V6 | `c1` deposit tx1 10; `c2` deposit tx1 50; `c2` dispute tx1 | The second deposit is a duplicate and is ignored, so `c2` cannot take over tx1. The dispute is ignored with `c1` as owner. `c1`: `10 / 0 / 10 / false`. `c2` has no account. |
+| A28 | V6, R6 | `c1` deposit tx1 10; `c1` dispute tx1; `c1` chargeback tx1; `c1` deposit tx1 10; `c1` dispute tx1 | The repeated deposit is ignored, so the charged-back deposit is not reset. The last dispute is ignored under R6. `0 / 0 / 0 / true`. |
+| A29 | V6 | `c1` deposit tx1 5; `c1` withdrawal tx2 10 (rejected); `c1` deposit tx3 10; `c1` withdrawal tx2 10 | The rejected withdrawal binds tx2, so a later withdrawal reusing tx2 is ignored as a duplicate and cannot succeed after the deposit. `15 / 0 / 15 / false`. |
+| A30 | V6, M6 | `c1` deposit tx1 `abc`; `c1` deposit tx1 5 | The invalid row does not bind tx1, so the corrected row is applied. `5 / 0 / 5 / false`. |
+| A31 | V1 to V5 | `c1` deposit tx1 10, then invalid rows: `Deposit,1,2,5`; `deposit,+1,3,5`; `deposit,65536,4,5`; `deposit,1,4294967296,5`; `deposit,1,5`; `deposit,1,6,`; `deposit,1,7,5,`; then `c1` deposit tx8 1 | Every invalid row is skipped with its own reason and the run continues. `c1`: `11 / 0 / 11 / false`; no other account. |
+| A32 | V11 | `c1` deposit tx1 10; a row whose `type` is a quoted field holding a bare carriage return and an ANSI escape sequence | The row is invalid. Its diagnostic is a single line with the carriage return and escape written as escapes. (A quoted line break would end the line inside an open quote, which is fatal under V14.) `c1`: `10 / 0 / 10 / false`. |
+| A33 | V7 to V9 | (a) an empty file; (b) header `type,client,amount,tx`; (c) a valid header followed by a 5 KiB line | Each run exits `65` with one error line on stderr and nothing on stdout. In (c) memory stays bounded. |
+| A34 | V7, V10 | (a) no argument; (b) two arguments; (c) a path that does not exist; (d) a valid input with stdout closed | (a) and (b) exit `64`, (c) exits `66`, each with empty stdout. (d) exits `74` without a panic. |
+| A35 | V5, R2 | `c1` deposit tx1 10; `c1` dispute tx1 with amount `3`; `c1` resolve tx1 with amount `abc`; `c1` dispute tx1 with amount `-50`; `c1` chargeback tx1 with amount `10` | Every amount is ignored and every row applies to the full deposit. After the first dispute: `0 / 10 / 10 / false`. After the resolve: `10 / 0 / 10 / false`. After the chargeback: `0 / 0 / 0 / true`. |
+| A36 | V14 | `c1` deposit tx1 10, then `deposit,1,2,"1"0`; `deposit,1,3,1"0`; `deposit,1,4,""5""`; `deposit,1,5,"1,000"`; `"deposit", 1 ,6," 2.5 "` | The first three rows are invalid (`malformed_quote`), so the lenient readings `10`, `10`, and `5` never apply. tx5 is quoted correctly and fails as `invalid_amount`. tx6 is applied. `12.5 / 0 / 12.5 / false`. |
+| A37 | V7, V14 | (a) a valid header, `c1` deposit tx1 10, and `deposit,1,2,"5` as the last line; (b) the same rows with `deposit,1,3,7` and `8"` after the open quote | Each run exits `65` with one error line naming the line where the quote opens, and nothing on stdout. A lenient parser would read (a) as a deposit of `5`; in (b) the tx3 line is never applied, because it may be part of the quoted field. |
 
 ### Invariants
 
@@ -194,7 +234,7 @@ The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dis
 |----|------|-----------|
 | I1 | all | `total = available + held` for every account after every row |
 | I2 | R6, R9 | `locked` never goes from `true` back to `false` |
-| I3 | R3 to R8 | A rejected or ignored row leaves every account and every transaction state unchanged. The only exception is that a rejected withdrawal still creates a zero-balance account for an unseen client (R8). |
+| I3 | R3 to R8, V6 | A rejected or ignored row leaves every balance and every transaction state unchanged. An ignored row, including an invalid one, has no effect at all. A rejected withdrawal has exactly two effects: it creates a zero-balance account for an unseen client (R8) and it binds its `tx` ID (V6). |
 | I4 | R2, R4, R5 | `held` equals the sum of the amounts of the deposits currently in `Disputed` |
 | I5 | R1 | Only deposits ever reach `Disputed`, `Resolved`, or `ChargedBack` |
 | I6 | M2, M7 | No balance ever overflows silently: every change to `available`, `held`, or `total` is checked, and a row whose effect would overflow leaves every account unchanged |
@@ -202,6 +242,8 @@ The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dis
 | I8 | L3 | No withdrawal is ever applied to an account whose `locked` is `true` |
 | I9 | L2, L5 | A `deposit`, `dispute`, `resolve`, or `chargeback` row has the same effect on balances and transaction states whether or not the account is locked |
 | I10 | O1 to O10 | The output is a function of the input alone: the same input always produces byte-identical stdout, and every printed `total` equals the printed `available + held` |
+| I11 | V6 | Each `tx` ID is bound to at most one `deposit` or `withdrawal` for the whole run; once bound, no later row changes its client, amount, or type |
+| I12 | V7, V10, V13 | Every run ends with exit `0` and the full output CSV, or with one fatal exit code and an empty stdout (except a failed stdout write); no input makes the run panic |
 
 ## 7. Given assumptions
 
@@ -229,5 +271,4 @@ Listed in the order reviewers will weigh them when the output is already correct
 
 Not answered by the brief. Each must be decided in an ADR before or while implementing it.
 
-- How to handle a repeated `tx` ID on a deposit or withdrawal.
-- How to handle malformed rows: skip and log to stderr, or abort? This includes `deposit` and `withdrawal` rows whose amount is invalid under [ADR-0007](decisions/0007-money-representation.md).
+None are open. Repeated `tx` IDs and malformed rows are decided by [ADR-0010](decisions/0010-input-validation-and-errors.md).
