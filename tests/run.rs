@@ -1,6 +1,6 @@
 //! Integration tests: the public `run` function on in-memory input, stdout,
-//! and stderr (ADR-0014). Covers the catalog rows of requirements §6 that
-//! involve only deposits and withdrawals; the dispute rows come with E4.
+//! and stderr (ADR-0014). Covers the Integration rows of the requirements §6
+//! catalog; the dispute lifecycle itself is unit-tested in `engine`.
 
 use std::error::Error;
 use std::io;
@@ -53,6 +53,32 @@ fn a_rejected_withdrawal_opens_a_zero_account() -> TestResult {
     assert_eq!(
         stdout_of(input)?,
         expected(&["3,0.0000,0.0000,0.0000,false"])
+    );
+    Ok(())
+}
+
+/// A6, ADR-0006 R7, R8: a dispute on an unknown `tx` opens no account, so
+/// the output has only the header.
+#[test]
+fn a6_dispute_on_unknown_tx_prints_only_the_header() -> TestResult {
+    let input = "type,client,tx,amount\ndispute,9,7,\n";
+    assert_eq!(stdout_of(input)?, expected(&[]));
+    Ok(())
+}
+
+/// A35, ADR-0010 V5, ADR-0006 R2: the amount on a dispute-related row is
+/// ignored, even when it is invalid, and every row uses the full deposit.
+#[test]
+fn a35_amounts_on_dispute_rows_are_ignored() -> TestResult {
+    let input = "type,client,tx,amount\n\
+                 deposit,1,1,10\n\
+                 dispute,1,1,3\n\
+                 resolve,1,1,abc\n\
+                 dispute,1,1,-50\n\
+                 chargeback,1,1,10\n";
+    assert_eq!(
+        stdout_of(input)?,
+        expected(&["1,0.0000,0.0000,0.0000,true"])
     );
     Ok(())
 }

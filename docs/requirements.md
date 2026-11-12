@@ -158,6 +158,8 @@ These are treated as upstream errors and skipped without failing the run. "Skipp
 - Any invalid row (§2): wrong field count, unknown or miscased `type`, bad `client` or `tx`, a missing or invalid amount on a `deposit` or `withdrawal`, or a stray quote in a terminated line ([ADR-0010](decisions/0010-input-validation-and-errors.md) V1 to V5, V14).
 - `deposit` or `withdrawal` whose `tx` ID was already used by an earlier `deposit` or `withdrawal` that was applied or rejected, whatever its client, type, or amount. Invalid and ignored rows never use up an ID ([ADR-0010](decisions/0010-input-validation-and-errors.md) V6).
 
+When a `dispute`, `resolve`, or `chargeback` row breaks several of these rules, the checks run in a fixed order and the first that fails is the reason: the `tx` is stored, then the row's client owns it, then it is a deposit, then its state accepts the row. Each rule has its own reason code ([ADR-0016](decisions/0016-dispute-row-reasons-and-check-order.md) G1, G2).
+
 Diagnostics escape any echoed input, so every entry is exactly one line ([ADR-0010](decisions/0010-input-validation-and-errors.md) V11).
 
 Only a `deposit` or `withdrawal` row creates a client account, including a rejected withdrawal. Ignored rows never do.
@@ -206,7 +208,7 @@ Invariants are checked by tests only, never at run time (C4): non-test code has 
 
 ### Attack scenarios
 
-The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dispute-lifecycle.md), M1 to M8 of [ADR-0007](decisions/0007-money-representation.md), L1 to L7 of [ADR-0008](decisions/0008-locked-account-policy.md), O1 to O10 of [ADR-0009](decisions/0009-output-format.md), V1 to V14 of [ADR-0010](decisions/0010-input-validation-and-errors.md), S1 to S13 of [ADR-0011](decisions/0011-architecture-and-memory.md), and C1 to C7 of [ADR-0013](decisions/0013-attack-and-invariant-catalog.md); `§5` is the operation table and `§2` the input rules above. Rows are listed in input order; `c1`/`c2` are client IDs. Results are `available / held / total / locked`.
+The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dispute-lifecycle.md), M1 to M8 of [ADR-0007](decisions/0007-money-representation.md), L1 to L7 of [ADR-0008](decisions/0008-locked-account-policy.md), O1 to O10 of [ADR-0009](decisions/0009-output-format.md), V1 to V14 of [ADR-0010](decisions/0010-input-validation-and-errors.md), G1 to G3 of [ADR-0016](decisions/0016-dispute-row-reasons-and-check-order.md), S1 to S13 of [ADR-0011](decisions/0011-architecture-and-memory.md), and C1 to C7 of [ADR-0013](decisions/0013-attack-and-invariant-catalog.md); `§5` is the operation table and `§2` the input rules above. Rows are listed in input order; `c1`/`c2` are client IDs. Results are `available / held / total / locked`.
 
 | ID | Rule | Scenario (input rows) | Expected behavior | Test | Priority |
 |----|------|-----------------------|-------------------|------|----------|
@@ -255,6 +257,7 @@ The `Rule` column refers to the rules R1 to R10 of [ADR-0006](decisions/0006-dis
 | A43 | §2 | A UTF-8 byte order mark, the header ` type , client , tx , amount `, `\r\n` line endings, one empty line, and the rows `deposit, 1, 1, 1`; `deposit,1,2,1.0`; `"deposit",1,3,"1.2345"` | Every form is accepted. `c1`: `3.2345 / 0 / 3.2345 / false`. | Integration, CLI | P1 |
 | A44 | V4, O3, O4 | `deposit,65535,4294967295,1`; `deposit,0,0,1`; `deposit,007,0008,1` | The boundary IDs and the leading zeros are accepted. The output has rows for clients `0`, `7`, and `65535`, in that order, each `1.0000,0.0000,1.0000,false`. | Integration | P2 |
 | A45 | V3 | `c1` deposit tx1 10; the line `type,client,tx,amount` (two files joined); `c1` deposit tx2 5 | The repeated header is a data row with the unknown type `type`, so it is invalid and the run continues. `15 / 0 / 15 / false`. | Integration | P2 |
+| A46 | G1 to G3, R3 | `c1` deposit tx1 10; `c1` withdrawal tx2 1; `c1` deposit tx3 1; `c1` dispute tx3; `c1` chargeback tx3; `c1` withdrawal tx4 50 (rejected); then `c2` dispute tx2; `c2` resolve tx1; `c2` dispute tx3; `c2` dispute tx4 | Every `c2` row is ignored. The first three report `client_mismatch` naming `c1`, not the withdrawal, "not disputed", or "charged back" reasons, so `c2` learns nothing about the kind or state of `c1`'s transactions. tx4 is a rejected withdrawal and reports `unknown_tx`. `c1`: `9 / 0 / 9 / true`; `c2` has no account. | Unit | P3 |
 
 ### Invariants
 

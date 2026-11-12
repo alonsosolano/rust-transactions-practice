@@ -100,7 +100,7 @@ Exit code `0` means the run completed and stdout has the full output CSV. Every 
 | `deposit` or `withdrawal` with an invalid amount (ADR-0007 M3 to M5) | Ignored, invalid | Diagnostic, reason `invalid_amount` | 0 |
 | `dispute`, `resolve`, or `chargeback` with an amount (V5) | Not a condition: the amount is ignored and the row is processed | Only what ADR-0006 reports for the row | 0 |
 | `deposit` or `withdrawal` reusing a bound `tx` (V6) | Ignored | Diagnostic, reason `duplicate_tx`, owning client | 0 |
-| Dispute-related row not applicable (ADR-0006 R1 to R7) | Ignored | Diagnostic, reason per ADR-0006 | 0 |
+| Dispute-related row not applicable (ADR-0006 R1 to R7) | Ignored | Diagnostic, reason per ADR-0006, one of six codes in the check order of [ADR-0016](0016-dispute-row-reasons-and-check-order.md) | 0 |
 | Row whose effect would overflow (ADR-0007 M7) | Ignored | Diagnostic, reason `overflow` | 0 |
 | `withdrawal` with insufficient funds | Rejected | Diagnostic, reason `insufficient_funds` | 0 |
 | `withdrawal` on a locked account ([ADR-0008](0008-locked-account-policy.md) L3, L4: the lock is checked before funds) | Rejected | Diagnostic, reason `account_locked` | 0 |
@@ -217,4 +217,5 @@ Reason codes are named here for clarity; the code may spell them differently as 
 * The test type and priority of each scenario and invariant are set by [ADR-0013](0013-attack-and-invariant-catalog.md), whose per-client projection invariant (I18) excludes `tx` IDs shared across clients under V6.
 * Answers the open questions on malformed rows and duplicate `tx` IDs in [requirements §10](../requirements.md). Dependencies (`csv`, `thiserror`) and lint policy are decided by D7 (LYA-45); the attack catalog by D8 (LYA-46); the CLI entry point is built in E1 (LYA-49).
 * Revisit if an upstream needs case-insensitive types or partial disputes (the amount on dispute-related rows would then need a meaning and validation), if an error budget becomes necessary, if an upstream needs multi-line quoted fields, or if the CLI ever gains optional flags.
+* The six reason codes for dispute-related rows and the order in which they are checked are set by [ADR-0016](0016-dispute-row-reasons-and-check-order.md).
 * Tracked by issue LYA-43 (D5).
