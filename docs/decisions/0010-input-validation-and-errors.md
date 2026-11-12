@@ -113,7 +113,7 @@ Reason codes are named here for clarity; the code may spell them differently as 
 * Fields are trimmed of surrounding ASCII whitespace before every check ([requirements §2](../requirements.md)). Inner whitespace stays and makes the field invalid.
 * Simple quoting is accepted under V14, so `"deposit"` is `deposit` and `" 2.5 "` is `2.5`. Valid input never needs quotes. Quoted fields that span lines, which RFC 4180 allows, are not supported: no valid field contains a line break.
 * Quote checks run before field checks, so a row with a malformed quote always reports `malformed_quote`, whatever else is wrong with it.
-* The reader must implement V14 itself or add a strict check in front of a CSV crate. The `csv` crate alone does not satisfy V14, because `csv-core` accepts malformed quoting without an error. Which of the two is used is decided by D7.
+* The reader must implement V14 itself or add a strict check in front of a CSV crate. The `csv` crate alone does not satisfy V14, because `csv-core` accepts malformed quoting without an error. Which of the two is used is decided by D7. [ADR-0015](0015-hand-written-input-reader.md) chooses a hand-written reader.
 * Empty lines are not rows: they are skipped without a diagnostic. A line holding only whitespace is a row with one field and is invalid under V2.
 * Data rows are read as bytes, not as UTF-8 strings. Every valid field is ASCII, so invalid UTF-8 in a data row simply fails the field check where it appears (V1) instead of aborting the run.
 * A data row equal to the header (for example two files concatenated) has the type `type` and is invalid under V3.

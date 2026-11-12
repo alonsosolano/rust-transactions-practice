@@ -1,10 +1,33 @@
 //! Bounded, escaped stderr reporting and the end-of-run summary (ADR-0006 R10, ADR-0010 V11).
 //!
-//! Adapter module of the layout in ADR-0011. For now it holds only the
-//! escaping used for input echoed in diagnostics; the budget and the summary
-//! come with the engine.
+//! Adapter module of the layout in ADR-0011. For now it holds the escaping
+//! used for input echoed in diagnostics and a [`Diagnostics`] sink that
+//! receives every skipped row but writes nothing yet. The line format, the
+//! budget, and the summary come with the bounded diagnostics (E10, LYA-58).
 
 use std::fmt::{self, Display, Formatter, Write as _};
+
+use crate::engine::Rejection;
+use crate::input::InvalidRow;
+use crate::transaction::Transaction;
+
+/// Receives every row that the run skips (ADR-0006 R10).
+///
+/// The `run` loop already passes each invalid row and each rejection here,
+/// with its line number, so the bounded diagnostics (E10, LYA-58) only need to
+/// fill in these methods. Until then nothing is written: an unbounded stream
+/// of one line per row would break R10, and a provisional format would have to
+/// be redone.
+#[derive(Debug, Default)]
+pub struct Diagnostics;
+
+impl Diagnostics {
+    /// A row that failed validation (ADR-0010 V1 to V5, V14).
+    pub fn invalid(&mut self, _line: u64, _reason: InvalidRow) {}
+
+    /// A valid row that the engine rejected or ignored.
+    pub fn rejected(&mut self, _line: u64, _transaction: &Transaction, _reason: Rejection) {}
+}
 
 /// Most bytes of raw input echoed in one diagnostic. Longer input is cut off
 /// and marked, so each diagnostic line stays bounded (ADR-0006 R10).

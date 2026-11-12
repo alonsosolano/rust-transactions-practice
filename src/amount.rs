@@ -52,9 +52,11 @@ pub enum AmountError {
 
 impl Amount {
     /// The smallest amount, `0.0001`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "only tests use it so far"))]
     pub const MIN: Self = Self(NonZeroU64::MIN);
 
     /// The largest amount, `1844674407370955.1615` (`u64::MAX` units).
+    #[cfg_attr(not(test), expect(dead_code, reason = "only tests use it so far"))]
     pub const MAX: Self = Self(NonZeroU64::MAX);
 
     /// Parses one amount field (ADR-0007 M3 to M5).
@@ -125,6 +127,7 @@ pub struct Balance(i128);
 
 impl Balance {
     /// A balance of `0.0000`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "only tests use it so far"))]
     pub const ZERO: Self = Self(0);
 
     /// Returns `self + rhs`, or `None` if the result would overflow.
@@ -137,6 +140,13 @@ impl Balance {
     #[must_use]
     pub fn checked_sub(self, rhs: Self) -> Option<Self> {
         self.0.checked_sub(rhs.0).map(Self)
+    }
+
+    /// A balance of `units` units of `0.0001`, for tests in other modules
+    /// that need balances no valid input can reach, such as near overflow.
+    #[cfg(test)]
+    pub(crate) const fn from_units(units: i128) -> Self {
+        Self(units)
     }
 }
 

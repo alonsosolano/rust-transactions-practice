@@ -116,3 +116,54 @@ fn non_utf8_path_exits_66_and_is_escaped() -> TestResult {
     );
     Ok(())
 }
+
+/// Runs one sample case under `tests/cases/` and compares stdout, stderr, and
+/// the exit code with its expected files byte for byte (ADR-0014 T3, T4).
+/// E5 generalizes this into the `sample_cases` test over every case.
+fn run_case(name: &str) -> TestResult {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/cases")
+        .join(name);
+    let output = Command::new(env!("CARGO_BIN_EXE_rust-transactions-practice"))
+        .arg("input.csv")
+        .current_dir(&dir)
+        .stdin(Stdio::null())
+        .output()?;
+    let status = format!("{}\n", output.status.code().ok_or("killed by a signal")?);
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        std::fs::read_to_string(dir.join("expected.stdout"))?,
+        "{name}: stdout"
+    );
+    assert_eq!(
+        String::from_utf8(output.stderr)?,
+        std::fs::read_to_string(dir.join("expected.stderr"))?,
+        "{name}: stderr"
+    );
+    assert_eq!(
+        status,
+        std::fs::read_to_string(dir.join("expected.status"))?,
+        "{name}: status"
+    );
+    Ok(())
+}
+
+/// Interleaved clients, padded fields, mixed precision, and a withdrawal
+/// rejected for insufficient funds.
+#[test]
+fn deposits_and_withdrawals_sample_case() -> TestResult {
+    run_case("deposits-and-withdrawals")
+}
+
+/// ADR-0010 V8, V10: a file that is not this CSV (here `Cargo.toml`) has the
+/// wrong header and exits 65 with one escaped stderr line.
+#[test]
+fn wrong_header_exits_65() -> TestResult {
+    let output = run_binary(["Cargo.toml"])?;
+    let stderr = assert_fatal(&output, 65)?;
+    assert_eq!(
+        stderr,
+        "error: wrong header: expected \"type,client,tx,amount\", found \"[package]\"\n"
+    );
+    Ok(())
+}

@@ -233,6 +233,7 @@ The lints are `deny` rather than `warn`, so a plain `cargo clippy` already fails
   * [`println!` panics if writing to stdout fails](https://doc.rust-lang.org/std/macro.println.html#panics).
   * [cargo-deny](https://embarkstudios.github.io/cargo-deny/) and the [RustSec advisory database](https://rustsec.org/).
   * [`csv` crate tutorial](https://docs.rs/csv/latest/csv/tutorial/index.html) on decoding with serde.
+* The input is read by a hand-written strict reader, not by the `csv` crate: [ADR-0015](0015-hand-written-input-reader.md) narrows the purpose of `csv` and serde in the table above to writing the output CSV.
 * Coordination: D5 (LYA-43) decides which errors exist, how each is classified, and its exit code; this ADR only decides that the error enums use `thiserror` and that `main` maps them to an `ExitCode` without `anyhow`. Revisit S1 if D5 needs something `thiserror` cannot express.
 * Settles the open question in [ADR-0007](0007-money-representation.md) on where its numeric lints apply: crate-wide, outside tests (S7).
 * How CLI and property tests are laid out and run is decided in [ADR-0014](0014-testing-strategy.md).

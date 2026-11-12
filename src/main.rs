@@ -39,13 +39,20 @@ impl Fatal {
     /// The exit code of ADR-0010 V10, using the `sysexits.h` values.
     fn exit_code(&self) -> ExitCode {
         const EX_USAGE: u8 = 64;
+        const EX_DATAERR: u8 = 65;
         const EX_NOINPUT: u8 = 66;
         const EX_IOERR: u8 = 74;
 
         ExitCode::from(match self {
             Self::Usage => EX_USAGE,
             Self::Open { .. } => EX_NOINPUT,
-            Self::Run(RunError::WriteOutput(_)) => EX_IOERR,
+            Self::Run(
+                RunError::MissingHeader
+                | RunError::WrongHeader { .. }
+                | RunError::LineTooLong { .. }
+                | RunError::UnterminatedQuote { .. },
+            ) => EX_DATAERR,
+            Self::Run(RunError::ReadInput { .. } | RunError::WriteOutput(_)) => EX_IOERR,
         })
     }
 }
