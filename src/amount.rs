@@ -40,7 +40,7 @@ pub enum AmountError {
     #[error("amount is not a plain decimal number")]
     Syntax,
     /// A non-zero digit follows the fourth fractional digit (M4).
-    #[error("amount has more than 4 non-zero fractional digits")]
+    #[error("amount has a non-zero digit after the fourth decimal place")]
     TooPrecise,
     /// The value is zero (M5).
     #[error("amount is zero")]
@@ -354,6 +354,16 @@ mod tests {
         for field in ["1.00005", "0.00001", "1.23456", "1.000000001", "0.00015"] {
             assert_eq!(parse(field), Err(AmountError::TooPrecise), "{field:?}");
         }
+    }
+
+    /// The message names the position of the excess digit, which is true
+    /// even when only one fractional digit is non-zero (`0.00001`).
+    #[test]
+    fn too_precise_message_names_the_decimal_place() {
+        assert_eq!(
+            parse("0.00001").unwrap_err().to_string(),
+            "amount has a non-zero digit after the fourth decimal place"
+        );
     }
 
     #[test]
