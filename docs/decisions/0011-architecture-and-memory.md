@@ -342,6 +342,7 @@ flowchart LR
 
 ## More Information
 
+* Invariants not guaranteed by types are checked by tests only, never at run time, and the per-client ordering contract of stage 2 is stated as invariant I18; see [ADR-0013](0013-attack-and-invariant-catalog.md).
 * Industry references:
   * The [`csv` tutorial](https://docs.rs/csv/latest/csv/tutorial/index.html) on internal buffering ("Reading CSV"), reusing one record ("Amortizing allocations"), and borrowed fields ("Serde and zero allocation").
   * The [Rust `HashMap` documentation](https://doc.rust-lang.org/std/collections/struct.HashMap.html) on the default SipHash 1-3 hasher and its resistance to HashDoS attacks, the [Rust collections performance table](https://doc.rust-lang.org/std/collections/index.html#performance), which lists `HashMap::insert` as expected and amortized constant time, and the [SwissTable design notes](https://abseil.io/about/design/swisstables) behind its layout.
