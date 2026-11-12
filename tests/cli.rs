@@ -2,7 +2,9 @@
 //! process, such as argument handling and exit codes.
 //!
 //! Every fatal case checks the exit code, that stdout is empty, and that
-//! stderr has exactly one line (ADR-0010 V7, V11; invariant I12).
+//! stderr ends with exactly one error line (ADR-0010 V7, V11; invariant I12).
+//! A fatal error raised after the input was opened comes after the
+//! diagnostics summary (ADR-0017 D7).
 
 use std::error::Error;
 use std::ffi::OsStr;
@@ -35,6 +37,24 @@ fn assert_fatal(output: &Output, code: i32) -> Result<String, Box<dyn Error>> {
     assert_eq!(stderr.lines().count(), 1, "one stderr line: {stderr:?}");
     assert!(stderr.ends_with('\n'), "stderr line ends with a newline");
     Ok(stderr)
+}
+
+/// The summary of a run that skipped no row (ADR-0017 D6).
+const EMPTY_SUMMARY: &str = "summary: skipped=0 rejected=0 ignored=0\n";
+
+/// Checks a fatal run that failed after opening its input: the summary comes
+/// first and the error line is the last line. Returns the error line.
+fn assert_fatal_after_summary(output: &Output, code: i32) -> Result<String, Box<dyn Error>> {
+    assert_eq!(output.status.code(), Some(code), "exit code");
+    assert!(output.stdout.is_empty(), "stdout must be empty");
+    let stderr = String::from_utf8(output.stderr.clone())?;
+    let error = stderr
+        .strip_prefix(EMPTY_SUMMARY)
+        .ok_or_else(|| format!("summary first: {stderr:?}"))?;
+    assert_eq!(error.lines().count(), 1, "one error line: {stderr:?}");
+    assert!(error.starts_with("error: "), "{stderr:?}");
+    assert!(error.ends_with('\n'), "error line ends with a newline");
+    Ok(error.to_owned())
 }
 
 #[test]
@@ -179,14 +199,42 @@ fn dispute_then_chargeback_sample_case() -> TestResult {
 }
 
 /// ADR-0010 V8, V10: a file that is not this CSV (here `Cargo.toml`) has the
-/// wrong header and exits 65 with one escaped stderr line.
+/// wrong header and exits 65 with one escaped error line after the summary
+/// (ADR-0017 D7).
 #[test]
 fn wrong_header_exits_65() -> TestResult {
     let output = run_binary(["Cargo.toml"])?;
-    let stderr = assert_fatal(&output, 65)?;
+    let stderr = assert_fatal_after_summary(&output, 65)?;
     assert_eq!(
         stderr,
         "error: wrong header: expected \"type,client,tx,amount\", found \"[package]\"\n"
+    );
+    Ok(())
+}
+
+/// A16, ADR-0014 T9: stderr is a pipe whose reader has closed, so every
+/// diagnostic write fails with a broken pipe. The run still exits 0 with the
+/// same stdout as the sample case. The reader is dropped right after `spawn`,
+/// which races the child's first stderr write; a lost race makes the write
+/// succeed and the test still pass, so this test can only miss the failure,
+/// never report a false one.
+#[test]
+fn a16_closed_stderr_pipe_changes_nothing() -> TestResult {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/cases/deposits-and-withdrawals");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rust-transactions-practice"))
+        .arg("input.csv")
+        .current_dir(&dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    drop(child.stderr.take());
+    let output = child.wait_with_output()?;
+    assert_eq!(output.status.code(), Some(0), "exit code");
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        std::fs::read_to_string(dir.join("expected.stdout"))?
     );
     Ok(())
 }

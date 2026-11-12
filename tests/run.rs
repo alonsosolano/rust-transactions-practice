@@ -279,3 +279,149 @@ fn fatal_input_errors_leave_stdout_empty() -> TestResult {
     }
     Ok(())
 }
+
+/// Runs `input` with a recording stderr and returns stdout and stderr as text.
+fn streams_of(input: &[u8]) -> Result<(String, String), Box<dyn Error>> {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    run(input, &mut stdout, &mut stderr)?;
+    Ok((String::from_utf8(stdout)?, String::from_utf8(stderr)?))
+}
+
+/// A15, ADR-0006 R10, ADR-0017 D5, D6: a million ignored rows give 100
+/// detailed lines, one notice, and a summary that counts every one of them.
+/// The account is untouched and the ignored rows open no account.
+#[test]
+fn a15_a_million_ignored_rows_give_bounded_stderr() -> TestResult {
+    const IGNORED: usize = 1_000_000;
+    let mut input = String::from("type,client,tx,amount\ndeposit,1,1,10\n");
+    input.push_str(&"dispute,2,1,\n".repeat(IGNORED));
+    let (stdout, stderr) = streams_of(input.as_bytes())?;
+    assert_eq!(stdout, expected(&["1,10.0000,0.0000,10.0000,false"]));
+
+    let lines: Vec<&str> = stderr.lines().collect();
+    let detailed = lines.iter().filter(|l| l.starts_with("ignored: ")).count();
+    let notices = lines.iter().filter(|l| l.starts_with("notice: ")).count();
+    assert_eq!(detailed, 100);
+    assert_eq!(notices, 1);
+    assert_eq!(
+        lines.first(),
+        Some(&"ignored: line 3: client_mismatch type=dispute client=2 tx=1 owner=1")
+    );
+    assert_eq!(
+        lines.get(100),
+        Some(
+            &"notice: line 103: more than 100 skipped rows; \
+              further skipped rows are counted in the summary only"
+        )
+    );
+    assert_eq!(
+        lines.get(101..),
+        Some(
+            &[
+                "summary: skipped=1000000 rejected=0 ignored=1000000",
+                "summary: reason=client_mismatch count=1000000",
+            ][..]
+        )
+    );
+    assert!(stderr.len() < 16 * 1024, "stderr is {} bytes", stderr.len());
+    Ok(())
+}
+
+/// A writer whose every write and flush fails with a broken pipe.
+struct BrokenPipe;
+
+impl io::Write for BrokenPipe {
+    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+        Err(io::ErrorKind::BrokenPipe.into())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Err(io::ErrorKind::BrokenPipe.into())
+    }
+}
+
+/// A16, ADR-0006 R10, ADR-0012 S8: with stderr failing on every write, the
+/// run still completes and stdout is the same as with a working stderr.
+#[test]
+fn a16_failing_stderr_changes_nothing() -> TestResult {
+    let inputs = [
+        // A1: withdraw, then dispute and charge back.
+        "type,client,tx,amount\ndeposit,1,1,100\nwithdrawal,1,2,100\n\
+         dispute,1,1,\nchargeback,1,1,\n",
+        // A2: a withdrawal rejected while available is negative.
+        "type,client,tx,amount\ndeposit,1,1,100\nwithdrawal,1,2,100\n\
+         dispute,1,1,\nwithdrawal,1,3,10\nresolve,1,1,\n",
+        // A25 and more: rejected, ignored, and invalid rows past the budget.
+        &format!(
+            "type,client,tx,amount\ndeposit,1,1,10\ndispute,1,1,\nchargeback,1,1,\n\
+             withdrawal,1,3,100\n{}",
+            "dispute,2,9,\nbogus\n".repeat(150)
+        ),
+    ];
+    for input in inputs {
+        let (working, _) = streams_of(input.as_bytes())?;
+        let mut stdout = Vec::new();
+        run(input.as_bytes(), &mut stdout, BrokenPipe)?;
+        assert_eq!(String::from_utf8(stdout)?, working, "{input:?}");
+    }
+    Ok(())
+}
+
+/// A32, ADR-0010 V11, ADR-0017 D4: a quoted `type` holding a bare carriage
+/// return and an ANSI escape sequence makes the row invalid, and its
+/// diagnostic is one line with both written as escapes.
+#[test]
+fn a32_hostile_input_is_escaped_on_one_line() -> TestResult {
+    let input = b"type,client,tx,amount\ndeposit,1,1,10\n\"dep\rosit\x1b[31m\",1,2,5\n";
+    let (stdout, stderr) = streams_of(input)?;
+    assert_eq!(stdout, expected(&["1,10.0000,0.0000,10.0000,false"]));
+    assert_eq!(
+        stderr,
+        "ignored: line 3: unknown_type input=\"\\\"dep\\rosit\\x1b[31m\\\",1,2,5\"\n\
+         summary: skipped=1 rejected=0 ignored=1\n\
+         summary: reason=unknown_type count=1\n"
+    );
+    assert!(!stderr.contains(['\r', '\x1b']));
+    Ok(())
+}
+
+/// ADR-0017 D7: when reading stops on a fatal error, the summary still
+/// counts the rows skipped before it, so the caller's error line follows it.
+#[test]
+fn a_fatal_error_still_writes_the_summary_first() -> TestResult {
+    let input = "type,client,tx,amount\nwithdrawal,1,1,5\ndispute,1,7,\ndeposit,1,2,\"5";
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let result = run(input.as_bytes(), &mut stdout, &mut stderr);
+    assert!(matches!(
+        result,
+        Err(RunError::UnterminatedQuote { line: 4 })
+    ));
+    assert!(stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(stderr)?,
+        "rejected: line 2: insufficient_funds type=withdrawal client=1 tx=1 amount=5.0000\n\
+         ignored: line 3: unknown_tx type=dispute client=1 tx=7\n\
+         summary: skipped=2 rejected=1 ignored=1\n\
+         summary: reason=unknown_tx count=1\n\
+         summary: reason=insufficient_funds count=1\n"
+    );
+    Ok(())
+}
+
+/// ADR-0017 D6, D7: a header error stops the run before any row, and the
+/// summary of zero skipped rows is still written.
+#[test]
+fn a_header_error_writes_a_zero_summary() -> TestResult {
+    for input in ["", "type,client,amount,tx\ndeposit,1,1,10\n"] {
+        let mut stderr = Vec::new();
+        assert!(run(input.as_bytes(), io::sink(), &mut stderr).is_err());
+        assert_eq!(
+            String::from_utf8(stderr)?,
+            "summary: skipped=0 rejected=0 ignored=0\n",
+            "{input:?}"
+        );
+    }
+    Ok(())
+}
