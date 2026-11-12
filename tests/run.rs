@@ -246,6 +246,35 @@ fn a45_repeated_header_is_invalid() -> TestResult {
     Ok(())
 }
 
+/// I17, ADR-0006 R8, ADR-0009 O2, O3: the output has one row per account, in
+/// ascending client order, and the accounts are exactly the clients with an
+/// applied or rejected `deposit` or `withdrawal`. Client 0's rejected
+/// withdrawal opens a zero row. A duplicate deposit (6), a dispute on an
+/// unknown `tx` (7), an invalid row (8), a dispute on another client's `tx`
+/// (4), and a withdrawal reusing a rejected withdrawal's ID (3) open nothing.
+#[test]
+fn i17_one_row_per_opened_account_in_client_order() -> TestResult {
+    let input = "type,client,tx,amount\n\
+                 deposit,9,1,3\n\
+                 withdrawal,0,2,1\n\
+                 deposit,5,3,2\n\
+                 deposit,6,3,50\n\
+                 dispute,7,99,\n\
+                 deposit,8,4,abc\n\
+                 dispute,4,1,\n\
+                 withdrawal,3,2,1\n\
+                 deposit,9,5,1\n";
+    assert_eq!(
+        stdout_of(input)?,
+        expected(&[
+            "0,0.0000,0.0000,0.0000,false",
+            "5,2.0000,0.0000,2.0000,false",
+            "9,4.0000,0.0000,4.0000,false",
+        ])
+    );
+    Ok(())
+}
+
 /// Recognizes the fatal error a case expects.
 type IsExpected = fn(&RunError) -> bool;
 
