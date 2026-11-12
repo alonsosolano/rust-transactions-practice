@@ -7,7 +7,7 @@ Measured wall time and peak memory of the engine on generated inputs of 1 millio
 * **The input is streamed.** On rows that bind no `tx` ID, peak memory is about 1 MiB at 1 million, 10 million, and 100 million rows alike.
 * **Memory follows stored state only.** On the realistic mix, memory grows with the number of stored records (one per applied or rejected deposit or withdrawal, [ADR-0011](decisions/0011-architecture-and-memory.md) S10) and matches the hash table layout that ADR-0011 describes.
 * **Peak memory on macOS is up to 2× the final table, not 1.5×.** The allocator keeps freed tables resident up to some hundreds of MiB, so earlier generations of the table still count at the peak. At 100 million rows the peak was 1.5×, as ADR-0011 estimates. See [Peak memory and the allocator](#peak-memory-and-the-allocator).
-* **Throughput** is about 4 million rows per second on the realistic mix and 14 to 16 million per second on rows that bind nothing. A row costs about 0.2 µs in the median.
+* **Throughput** is about 4 million rows per second on the realistic mix up to 10 million rows (about 2 million at 100 million rows, where the system compressed memory) and 14 to 16 million per second on rows that bind nothing. A row costs about 0.2 µs in the median.
 * **One growth step of the transaction table** stalls the input for about 4 ms at 1 million records, 111 ms at 9 million, and 0.9 s at 90 million.
 * **The standard SipHash hasher costs about 10%** of the run time compared with a fast unkeyed hash. It is not a bottleneck, so it stays ([ADR-0011](decisions/0011-architecture-and-memory.md) S9).
 * **No fix was needed.** Output is already buffered, diagnostics are bounded, and reserving capacity up front is ruled out by ADR-0011.

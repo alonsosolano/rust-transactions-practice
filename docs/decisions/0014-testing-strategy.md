@@ -50,7 +50,7 @@ Chosen options: byte-for-byte comparison; one directory per sample case with pla
 |------|----------|------|---------|
 | Unit | A `#[cfg(test)] mod tests` at the end of the module it tests (`src/amount.rs`, `src/engine.rs`, …) | Private items of that module | `cargo test` |
 | Property | The same in-crate test modules. Properties of the whole pipeline (I10, I12, I17, I18) live in the test module of `src/lib.rs` and call `run` on in-memory bytes. Shared strategies, `assert_invariants`, and the applied-row ledger of C5 live in `src/test_support.rs`, declared `#[cfg(test)] mod test_support;` | Crate-private items | `cargo test`, 256 cases per property |
-| Integration | `tests/run.rs`, calling the public `run` with in-memory input, stdout, and stderr ([ADR-0011](0011-architecture-and-memory.md) S1). Shared helpers in `tests/common/mod.rs` | Public API only | `cargo test` |
+| Integration | `tests/run.rs`, calling the public `run` with in-memory input, stdout, and stderr ([ADR-0011](0011-architecture-and-memory.md) S1). Each test file keeps its own small helpers; a shared `tests/common/mod.rs` is added only if two files need the same one | Public API only | `cargo test` |
 | CLI | `tests/cli.rs`: one `sample_cases` test over `tests/cases/*/`, plus hand-written tests for what a file cannot express (T9) | The built binary only | `cargo test` |
 | Type | No test of its own. The catalog row also names another type that catches a regression (C2) | — | — |
 | Large input | `examples/generate.rs`, a generator run by hand (T12). `cargo test` builds it but does not run it | — | Manual, measured in E7 |
@@ -83,7 +83,8 @@ Every test type that [requirements §6](../requirements.md) uses has a location,
 | Unit: A1 to A14, A23 to A25, A27 to A29, A38 to A41, A46; I3, I6, I7, I11, I16 | `#[cfg(test)]` module of `engine`, `account`, `store`, or `amount`, with `assert_invariants` after every step (C4) |
 | Integration: A6, A15 to A22, A30 to A32, A35, A36, A43 to A45; I17 | `tests/run.rs` |
 | CLI, sample case: A26, A33 (a, b, c), A37 (a, b), A42 (a, b, c), A43 | `tests/cases/<case>/`, run by `sample_cases` |
-| CLI, hand-written: A16, A34 (a to d); I10, I12 | `tests/cli.rs`. I12 is also enforced on every sample case by T6 |
+| CLI, hand-written: A16, A34 (a to d); I10 | `tests/cli.rs` |
+| CLI, every sample case: I12 | `tests/cli.rs`, enforced on each case by the T6 check inside `sample_cases` |
 | Property: I1 to I18 | In-crate property tests (T1, T11); I10, I12, I17, I18 at the `run` level in `src/lib.rs` |
 | Type: I1, I2, I5 | Covered by the property tests above (C2) |
 

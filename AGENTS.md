@@ -36,7 +36,7 @@ Before declaring a task done, run `cargo fmt --all --check`, `cargo clippy --all
 
 ## Toolchain
 
-Rust stable, edition 2024, pinned via `rust-toolchain.toml` (includes `rustfmt` and `clippy`). `rust-version` is 1.85; do not raise it without a reason ([ADR-0012](docs/decisions/0012-dependencies-and-safety-policy.md)).
+Rust stable, edition 2024. `rust-toolchain.toml` selects the `stable` channel, which tracks the latest stable release rather than a fixed version ([ADR-0005](docs/decisions/0005-toolchain-and-manual-ci.md)), and includes `rustfmt` and `clippy`. `rust-version` is 1.85; do not raise it without a reason ([ADR-0012](docs/decisions/0012-dependencies-and-safety-policy.md)).
 
 ## Dependencies and safety
 
@@ -58,11 +58,17 @@ Full rules and examples: [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Repository layout
 
 ```
-src/                 crate source
+src/                 crate source, with unit and property tests in each module
+tests/               integration (run.rs) and CLI (cli.rs) tests
+tests/cases/         sample cases: input.csv and expected stdout, stderr, exit status
+examples/            large-input generator (generate.rs) and latency probe (row_latency.rs)
+proptest-regressions/ saved failing seeds that proptest replays first
 docs/requirements.md behavior contract
 docs/decisions/      architecture decision records (MADR)
+docs/performance.md  time and memory measurements
 .github/             PR template, manual-only CI workflow
+clippy.toml          test exemptions and the float ban (lint levels are in Cargo.toml)
 cog.toml             commit convention and git hooks (cocogitto)
 deny.toml            supply-chain policy (cargo-deny)
-rust-toolchain.toml  toolchain pin
+rust-toolchain.toml  toolchain channel and components
 ```

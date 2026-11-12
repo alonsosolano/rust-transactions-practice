@@ -42,7 +42,7 @@ It checks the dependency graph against `deny.toml`: RustSec advisories, licenses
 
 ## Tests
 
-Layout and rules: [ADR-0014](docs/decisions/0014-testing-strategy.md). `cargo test` runs every unit, property, integration, and CLI test. The files and the generator named below are created by the implementation issues as the engine lands.
+Layout and rules: [ADR-0014](docs/decisions/0014-testing-strategy.md). `cargo test` runs every unit, property, integration, and CLI test.
 
 - **Unit and property tests** live in a `#[cfg(test)] mod tests` at the end of the module they test. Shared helpers such as `assert_invariants` are in `src/test_support.rs`.
 - **Integration tests** call the library's `run` in `tests/run.rs`. **CLI tests** run the binary in `tests/cli.rs`.

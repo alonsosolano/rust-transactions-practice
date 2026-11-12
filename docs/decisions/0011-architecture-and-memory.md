@@ -166,7 +166,7 @@ Measured with `std::mem::size_of` on the pinned toolchain for 64-bit targets.
 |------|------|--------|
 | `StoredTx` | 16 bytes | amount 8, client 2, kind 1 (the kind and dispute state share one byte), padding 5 |
 | `(TxId, StoredTx)` map slot | 24 bytes | key 4, padding 4, value 16 |
-| `Account` | 48 bytes | `available` 16, `held` 16, `locked` 1, padding to the 16-byte alignment of `i128` |
+| `Account` | 64 bytes | `available` 16, `held` 16, `total` 16, `locked` 1, padding to the 16-byte alignment of `i128`. `total` was added by [ADR-0015](0015-hand-written-input-reader.md) P9; S8 as first written gave 48 bytes |
 
 #### Transaction store
 
@@ -186,7 +186,7 @@ For comparison, a deposit row is about 15 to 50 bytes of input, so the store cos
 
 #### Accounts and buffers
 
-* Accounts: at most 65,536. A `BTreeMap` leaf holds 5 to 11 accounts in 576 bytes, so all possible accounts take about 3 to 8 MiB. Typical inputs with few clients take a few KiB.
+* Accounts: at most 65,536. A `BTreeMap` leaf holds 5 to 11 accounts in 752 bytes (64-byte `Account`). All 65,536 possible accounts measured 6.3 MiB of heap when inserted in random order and 8.0 MiB in ascending order. Typical inputs with few clients take a few KiB.
 * Input: one reused line buffer of at most 4 KiB (`MAX_RECORD_BYTES`, ADR-0010 V9), plus a fixed-size read buffer.
 * Output: the writer's internal buffer. Rows are formatted one at a time.
 * Diagnostics: one counter per reason and at most 100 bounded detailed entries, which are written, not kept.

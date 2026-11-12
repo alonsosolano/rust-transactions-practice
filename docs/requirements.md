@@ -24,7 +24,7 @@ Follow [ADR-0010](decisions/0010-input-validation-and-errors.md) V10. A fatal er
 |------|---------|
 | `0`  | The run completed and stdout has the full output, even if rows were rejected or ignored |
 | `64` | Usage error: no argument or more than one |
-| `65` | Invalid file data: missing or wrong header, or a record longer than the size limit |
+| `65` | Invalid file data: missing or wrong header, a record longer than the size limit, or a line that ends inside an open quoted field |
 | `66` | The input cannot be opened: not found, not readable, or a directory |
 | `74` | I/O error while reading the input or writing stdout |
 
