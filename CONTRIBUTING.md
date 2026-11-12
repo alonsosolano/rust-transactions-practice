@@ -40,6 +40,53 @@ cargo deny check
 
 It checks the dependency graph against `deny.toml`: RustSec advisories, licenses, duplicate versions, and sources. It needs network access to update the advisory database.
 
+## Tests
+
+Layout and rules: [ADR-0014](docs/decisions/0014-testing-strategy.md). `cargo test` runs every unit, property, integration, and CLI test. The files and the generator named below are created by the implementation issues as the engine lands.
+
+- **Unit and property tests** live in a `#[cfg(test)] mod tests` at the end of the module they test. Shared helpers such as `assert_invariants` are in `src/test_support.rs`.
+- **Integration tests** call the library's `run` in `tests/run.rs`. **CLI tests** run the binary in `tests/cli.rs`.
+- **Naming:** a test for a catalog row in `docs/requirements.md` §6 starts with its ID in lowercase (`a1_withdraw_then_chargeback`). A test covering several rows lists them in a `/// Covers: I1, I2.` doc comment.
+
+### Sample cases
+
+Each case is a directory `tests/cases/<case>/` with exactly four files:
+
+| File | Contents |
+|------|----------|
+| `input.csv` | The input passed to the binary |
+| `expected.stdout` | The exact expected stdout |
+| `expected.stderr` | The exact expected stderr |
+| `expected.status` | The exit code, for example `0` followed by a newline |
+
+Name a case `<id>-<slug>` for a catalog row (`a26-example-output`, `a33a-empty-file`) or `<slug>` otherwise, in lowercase kebab-case. The binary runs from the case directory with the argument `input.csv`, and all three outputs are compared byte for byte. Write the expected files by hand from the rules, never by copying the program's output. Git leaves the bytes of these files untouched (`.gitattributes`), so line endings and byte order marks in a case stay as written.
+
+### Deeper and optional checks
+
+Run the deep property check before a pull request that changes `amount`, `input`, `store`, or `engine`:
+
+```sh
+PROPTEST_CASES=10000 cargo test --release
+```
+
+If a property test fails, `proptest` saves the case under `proptest-regressions/`. Commit that file with the fix, so every later run replays it.
+
+Generate a large input for manual runs and measurements (never commit the result):
+
+```sh
+cargo run --release --example generate -- 1000000 42 mixed > transactions.csv
+```
+
+Optional test-quality tools. Neither is a gate and neither has a target percentage:
+
+```sh
+cargo install --locked cargo-llvm-cov   # or: brew install cargo-llvm-cov
+cargo llvm-cov --html                   # line coverage report in target/llvm-cov/html
+
+cargo install --locked cargo-mutants
+cargo mutants                           # lists mutants no test catches; review each by hand
+```
+
 ## Dependencies and safety
 
 [ADR-0012](docs/decisions/0012-dependencies-and-safety-policy.md) lists every allowed dependency and the lint policy. In short:
