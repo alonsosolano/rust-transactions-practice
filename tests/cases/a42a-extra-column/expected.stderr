@@ -1,0 +1,2 @@
+summary: skipped=0 rejected=0 ignored=0
+error: wrong header: expected "type,client,tx,amount", found "type,client,tx,amount,note"

@@ -1,0 +1,2 @@
+summary: skipped=0 rejected=0 ignored=0
+error: line 3: a quoted field is not closed before the end of the line
