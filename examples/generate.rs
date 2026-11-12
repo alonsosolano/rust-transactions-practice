@@ -23,6 +23,7 @@
 //! arithmetic, so the generator needs no crate (ADR-0012).
 
 use std::env;
+use std::ffi::OsString;
 use std::io::{self, BufWriter, Write};
 use std::process::ExitCode;
 
@@ -373,11 +374,17 @@ impl State {
     }
 }
 
-fn parse_args() -> Option<(u64, u64, Profile)> {
-    let mut args = env::args().skip(1);
-    let rows = args.next()?.parse().ok()?;
-    let seed = args.next()?.parse().ok()?;
-    let profile = match args.next()?.as_str() {
+/// Parses `<rows> <seed> <profile>`, the arguments after the program name.
+///
+/// Arguments are taken as `OsString`: `env::args` panics on an argument that
+/// is not valid Unicode, so a bad argument would crash instead of printing
+/// the usage line (ADR-0012 S6). Any argument that is not valid Unicode, not
+/// a number, or not a known profile gives `None`.
+fn parse_args(args: impl IntoIterator<Item = OsString>) -> Option<(u64, u64, Profile)> {
+    let mut args = args.into_iter().map(OsString::into_string);
+    let rows = args.next()?.ok()?.parse().ok()?;
+    let seed = args.next()?.ok()?.parse().ok()?;
+    let profile = match args.next()?.ok()?.as_str() {
         "mixed" => Profile::Mixed,
         "stateless" => Profile::Stateless,
         _ => return None,
@@ -389,7 +396,7 @@ fn parse_args() -> Option<(u64, u64, Profile)> {
 }
 
 fn main() -> ExitCode {
-    let Some((rows, seed, profile)) = parse_args() else {
+    let Some((rows, seed, profile)) = parse_args(env::args_os().skip(1)) else {
         let _ = writeln!(io::stderr(), "{USAGE}");
         return ExitCode::from(64);
     };
@@ -404,9 +411,10 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::io;
 
-    use super::{Profile, generate};
+    use super::{Profile, generate, parse_args};
 
     fn bytes(rows: u64, seed: u64, profile: Profile) -> Vec<u8> {
         let mut out = Vec::new();
@@ -505,5 +513,49 @@ mod tests {
             }
         }
         assert!(generate(10, 1, Profile::Mixed, Broken).is_err());
+    }
+
+    fn args(list: &[&str]) -> Vec<OsString> {
+        list.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn parses_valid_arguments() {
+        assert_eq!(
+            parse_args(args(&["1000", "42", "mixed"])),
+            Some((1000, 42, Profile::Mixed))
+        );
+        assert_eq!(
+            parse_args(args(&["0", "0", "stateless"])),
+            Some((0, 0, Profile::Stateless))
+        );
+    }
+
+    #[test]
+    fn rejects_missing_extra_and_unknown_arguments() {
+        for list in [
+            &[][..],
+            &["1000", "42"][..],
+            &["1000", "42", "mixed", "extra"][..],
+            &["many", "42", "mixed"][..],
+            &["1000", "-1", "mixed"][..],
+            &["1000", "42", "Mixed"][..],
+        ] {
+            assert_eq!(parse_args(args(list)), None, "{list:?}");
+        }
+    }
+
+    /// A non-Unicode argument is a usage error, not a panic.
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_non_unicode_argument() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let invalid = OsString::from_vec(vec![0xFF]);
+        for position in 0..3 {
+            let mut list = args(&["1000", "42", "mixed"]);
+            list[position] = invalid.clone();
+            assert_eq!(parse_args(list), None, "position {position}");
+        }
     }
 }
