@@ -80,7 +80,7 @@ Every test type that [requirements §6](../requirements.md) uses has a location,
 
 | Rows (by test type) | Location |
 |---------------------|----------|
-| Unit: A1 to A14, A23 to A25, A27 to A29, A38 to A41; I3, I6, I7, I11, I16 | `#[cfg(test)]` module of `engine`, `account`, `store`, or `amount`, with `assert_invariants` after every step (C4) |
+| Unit: A1 to A14, A23 to A25, A27 to A29, A38 to A41, A46; I3, I6, I7, I11, I16 | `#[cfg(test)]` module of `engine`, `account`, `store`, or `amount`, with `assert_invariants` after every step (C4) |
 | Integration: A6, A15 to A22, A30 to A32, A35, A36, A43 to A45; I17 | `tests/run.rs` |
 | CLI, sample case: A26, A33 (a, b, c), A37 (a, b), A42 (a, b, c), A43 | `tests/cases/<case>/`, run by `sample_cases` |
 | CLI, hand-written: A16, A34 (a to d); I10, I12 | `tests/cli.rs`. I12 is also enforced on every sample case by T6 |
