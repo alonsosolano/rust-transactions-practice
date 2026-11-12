@@ -1,0 +1,20 @@
+ignored: line 3: malformed_quote input="deposit,1,2,\"1\"0"
+ignored: line 4: field_count input="deposit,1,3,5,"
+ignored: line 5: unknown_type input="Deposit,1,4,5"
+ignored: line 6: invalid_client input="deposit,+1,5,5"
+ignored: line 7: invalid_tx input="deposit,1,4294967296,5"
+ignored: line 8: missing_amount input="withdrawal,1,7"
+ignored: line 9: invalid_amount detail=syntax input="deposit,1,8,1e3"
+ignored: line 10: invalid_amount detail=too_precise input="deposit,1,9,1.00005"
+ignored: line 11: invalid_amount detail=zero input="deposit,1,10,0"
+ignored: line 12: invalid_amount detail=too_large input="deposit,1,11,1844674407370955.1616"
+ignored: line 13: invalid_amount detail=syntax input="deposit,1,12,\t2.5\tx"
+ignored: line 14: invalid_amount detail=syntax input="deposit,1,13,5\xe2\x82\xac"
+summary: skipped=12 rejected=0 ignored=12
+summary: reason=malformed_quote count=1
+summary: reason=field_count count=1
+summary: reason=unknown_type count=1
+summary: reason=invalid_client count=1
+summary: reason=invalid_tx count=1
+summary: reason=missing_amount count=1
+summary: reason=invalid_amount count=6

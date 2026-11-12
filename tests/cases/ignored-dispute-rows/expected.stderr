@@ -1,0 +1,15 @@
+ignored: line 6: unknown_tx type=dispute client=1 tx=99
+ignored: line 7: client_mismatch type=dispute client=2 tx=1 owner=1
+ignored: line 8: not_a_deposit type=dispute client=1 tx=2
+ignored: line 9: already_disputed type=dispute client=1 tx=3
+ignored: line 10: not_disputed type=resolve client=1 tx=1
+ignored: line 12: already_charged_back type=dispute client=1 tx=3
+ignored: line 13: duplicate_tx type=deposit client=2 tx=1 amount=50.0000 owner=1
+summary: skipped=7 rejected=0 ignored=7
+summary: reason=duplicate_tx count=1
+summary: reason=unknown_tx count=1
+summary: reason=client_mismatch count=1
+summary: reason=not_a_deposit count=1
+summary: reason=already_disputed count=1
+summary: reason=already_charged_back count=1
+summary: reason=not_disputed count=1

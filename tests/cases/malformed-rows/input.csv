@@ -1,0 +1,15 @@
+type,client,tx,amount
+deposit,1,1,10
+deposit,1,2,"1"0
+deposit,1,3,5,
+Deposit,1,4,5
+deposit,+1,5,5
+deposit,1,4294967296,5
+withdrawal,1,7
+deposit,1,8,1e3
+deposit,1,9,1.00005
+deposit,1,10,0
+deposit,1,11,1844674407370955.1616
+deposit,1,12,	2.5	x
+deposit,1,13,5€
+deposit,1,2,1
