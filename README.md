@@ -232,4 +232,11 @@ The CLI is single-threaded, because one ordered file gives a second thread nothi
 
 ## AI assistance
 
-This project was developed with AI coding assistants. The full prompts and outputs are shared with reviewers separately.
+This project was developed with AI coding assistants:
+
+- **Claude Code** (desktop app), mostly with Claude Opus 5.5 and some Claude Sonnet 5.5.
+- **OpenAI Codex**.
+
+Work was split into issues: first the design decisions, each recorded as an ADR in [docs/decisions/](docs/decisions/), then implementation, tests, measurement, and review. Each issue ran in its own session and git worktree. The assistants researched options, drafted ADRs, wrote code and tests, and ran the local checks. I chose between options, set the priorities (security, reliability, and stability over leniency), reviewed every change, and merged each pull request.
+
+The full prompts and outputs, unredacted, are shared with reviewers separately instead of being committed here, because they quote the original exercise statement ([ADR-0001](docs/decisions/0001-keep-exercise-statement-out-of-repository.md)).
