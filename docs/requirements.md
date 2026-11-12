@@ -265,7 +265,7 @@ Listed in the order reviewers will weigh them when the output is already correct
 
 - A plain crate created with `cargo new` / `cargo init`, buildable with `cargo build` and runnable with `cargo run`.
 - Published as a public GitHub repository.
-- Dependencies limited to common, well-maintained crates that we consider secure (for example `serde` and `csv`). Every dependency must have a stated reason, recorded in an ADR, covering why it is needed and why it is trusted (maintenance, adoption, no `unsafe`-heavy or unvetted transitive dependencies).
+- Dependencies limited to common, well-maintained crates that we consider secure (for example `serde` and `csv`). Every dependency must have a stated reason, recorded in an ADR, covering why it is needed and why it is trusted (maintenance, adoption, no `unsafe`-heavy or unvetted transitive dependencies). The dependency list, the lint policy that enforces §8, and the supply-chain checks are in [ADR-0012](decisions/0012-dependencies-and-safety-policy.md).
 
 ## 10. Open questions
 

@@ -2,7 +2,9 @@
 name = "rust-transactions-practice"
 version = "0.1.0"
 edition = "2024"
-# Minimum for edition 2024. Revisit when dependencies are added.
+# Minimum for edition 2024; every dependency supports it (ADR-0012, rule S5).
 rust-version = "1.85"
+# Never published to crates.io (also lets cargo-deny skip the license check).
+publish = false
 
 [dependencies]

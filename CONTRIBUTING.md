@@ -16,6 +16,10 @@ cargo install --locked cocogitto
 
 # Install the versioned git hooks from cog.toml (once per clone)
 cog install-hook --all
+
+# Supply-chain checker (pick one)
+brew install cargo-deny
+cargo install --locked cargo-deny
 ```
 
 ## Local checks
@@ -27,6 +31,23 @@ cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 ```
+
+When `Cargo.toml` or `Cargo.lock` changes, also run:
+
+```sh
+cargo deny check
+```
+
+It checks the dependency graph against `deny.toml`: RustSec advisories, licenses, duplicate versions, and sources. It needs network access to update the advisory database.
+
+## Dependencies and safety
+
+[ADR-0012](docs/decisions/0012-dependencies-and-safety-policy.md) lists every allowed dependency and the lint policy. In short:
+
+- A new dependency needs a new ADR that says why it is needed and why it is trusted.
+- Clippy denies `unsafe`, panicking constructs outside tests, floats, unchecked arithmetic, `as` casts, and `print!`-family macros.
+- Clippy does not catch a panic inside a called function, such as `str::split_at` on a bad index. For code that handles input, check each API's "Panics" section, prefer the non-panicking variant, and cover it with a property test on arbitrary input.
+- `#[allow]` is denied. Use `#[expect(lint, reason = "...")]` at the narrowest scope, so every exception carries its justification.
 
 ## Commit messages
 
