@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use crate::account::Account;
 use crate::amount::Balance;
 use crate::engine::Engine;
-use crate::store::StoredTx;
+use crate::store::{DisputeState, StoredKind, StoredTx};
 use crate::transaction::{ClientId, TxId};
 
 /// Every account and every bound `tx` ID, in a form tests can compare.
@@ -32,11 +32,19 @@ pub(crate) fn snapshot(engine: &Engine) -> Snapshot {
 ///
 /// * I1: `total = available + held` for every account.
 /// * I13: `held` is never negative.
-/// * I4: `held` equals the sum of the client's deposits under dispute. No
-///   deposit can be under dispute until the dispute lifecycle (E4) exists, so
-///   for now `held` must be zero; E4 replaces this with the sum.
+/// * I4: `held` equals the sum of the amounts of the client's deposits in
+///   `Disputed`.
 pub(crate) fn assert_invariants(engine: &Engine) {
-    let (accounts, _) = engine.parts();
+    let (accounts, store) = engine.parts();
+    let mut disputed: BTreeMap<ClientId, Balance> = BTreeMap::new();
+    for (_, record) in store.iter() {
+        if record.kind() == StoredKind::Deposit(DisputeState::Disputed) {
+            let sum = disputed.entry(record.client()).or_insert(Balance::ZERO);
+            *sum = sum
+                .checked_add(Balance::from(record.amount()))
+                .expect("the sum of disputed deposits fits in a balance");
+        }
+    }
     for (client, account) in accounts {
         assert_eq!(
             account.available().checked_add(account.held()),
@@ -49,7 +57,7 @@ pub(crate) fn assert_invariants(engine: &Engine) {
         );
         assert_eq!(
             account.held(),
-            Balance::ZERO,
+            disputed.get(client).copied().unwrap_or(Balance::ZERO),
             "I4 broken for client {client}"
         );
     }

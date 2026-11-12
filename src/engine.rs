@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use crate::account::{Account, WithdrawalError};
 use crate::amount::Amount;
-use crate::store::{DisputeState, Store, StoredKind, StoredTx};
+use crate::store::{DisputeAction, DisputeState, Store, StoredKind, StoredTx, TransitionError};
 use crate::transaction::{ClientId, Transaction, TxId};
 
 /// Why a valid row changed no balance (ADR-0010, condition table).
@@ -31,10 +31,38 @@ pub enum Rejection {
     /// A row whose effect would overflow a balance (`overflow`, ADR-0007 M7).
     /// Ignored.
     Overflow,
-    /// A `dispute`, `resolve`, or `chargeback` row. The dispute lifecycle is
-    /// not built yet (E4, LYA-52), so these rows are ignored and reported.
-    /// E4 replaces this variant with the reasons of ADR-0006.
-    NotYetSupported,
+    /// A dispute-related row whose `tx` is unbound or names a rejected
+    /// withdrawal, which is treated as never stored (`unknown_tx`, ADR-0006
+    /// R7, ADR-0011 S10). Ignored.
+    UnknownTx,
+    /// A dispute-related row from a client that does not own the `tx`
+    /// (`client_mismatch`, ADR-0006 R3). Ignored.
+    ClientMismatch {
+        /// The client that owns the ID.
+        owner: ClientId,
+    },
+    /// A dispute-related row on an applied withdrawal (`not_a_deposit`,
+    /// ADR-0006 R1). Ignored.
+    NotADeposit,
+    /// A dispute on a deposit already under dispute (`already_disputed`,
+    /// ADR-0006 R4). Ignored.
+    AlreadyDisputed,
+    /// A dispute-related row on a charged-back deposit
+    /// (`already_charged_back`, ADR-0006 R6). Ignored.
+    AlreadyChargedBack,
+    /// A resolve or chargeback on a deposit not under dispute
+    /// (`not_disputed`, ADR-0006 R7). Ignored.
+    NotDisputed,
+}
+
+impl From<TransitionError> for Rejection {
+    fn from(error: TransitionError) -> Self {
+        match error {
+            TransitionError::AlreadyDisputed => Self::AlreadyDisputed,
+            TransitionError::AlreadyChargedBack => Self::AlreadyChargedBack,
+            TransitionError::NotDisputed => Self::NotDisputed,
+        }
+    }
 }
 
 /// The ledger: every account and every bound `tx` ID (ADR-0011).
@@ -74,9 +102,15 @@ impl Engine {
         match transaction {
             Transaction::Deposit { client, tx, amount } => self.deposit(client, tx, amount),
             Transaction::Withdrawal { client, tx, amount } => self.withdraw(client, tx, amount),
-            Transaction::Dispute { .. }
-            | Transaction::Resolve { .. }
-            | Transaction::Chargeback { .. } => Err(Rejection::NotYetSupported),
+            Transaction::Dispute { client, tx } => {
+                self.dispute_row(client, tx, DisputeAction::Dispute)
+            }
+            Transaction::Resolve { client, tx } => {
+                self.dispute_row(client, tx, DisputeAction::Resolve)
+            }
+            Transaction::Chargeback { client, tx } => {
+                self.dispute_row(client, tx, DisputeAction::Chargeback)
+            }
         }
     }
 
@@ -138,6 +172,51 @@ impl Engine {
         Err(rejection)
     }
 
+    /// Applies a `dispute`, `resolve`, or `chargeback` row (ADR-0006).
+    ///
+    /// The checks run in a fixed order, and the first that fails is the
+    /// reason (ADR-0016 G2): the `tx` must be stored, then owned by the row's
+    /// client, then be a deposit, then be in a state the row can move. The
+    /// ownership check comes right after the lookup, so a row from another
+    /// client learns nothing about the transaction's kind or state.
+    ///
+    /// The lock is never read here: these rows behave the same on a locked
+    /// account (ADR-0008 L5). Only a chargeback sets it.
+    fn dispute_row(
+        &mut self,
+        client: ClientId,
+        tx: TxId,
+        action: DisputeAction,
+    ) -> Result<(), Rejection> {
+        let stored = self.store.get(tx).ok_or(Rejection::UnknownTx)?;
+        let state = match stored.kind() {
+            StoredKind::RejectedWithdrawal => return Err(Rejection::UnknownTx),
+            StoredKind::Deposit(_) | StoredKind::Withdrawal if stored.client() != client => {
+                return Err(Rejection::ClientMismatch {
+                    owner: stored.client(),
+                });
+            }
+            StoredKind::Withdrawal => return Err(Rejection::NotADeposit),
+            StoredKind::Deposit(state) => state,
+        };
+        let next = state.next(action)?;
+
+        // A stored deposit always has an account: `deposit` inserts the
+        // account before it binds the ID.
+        let current = self.account(client);
+        let amount = stored.amount();
+        let updated = match action {
+            DisputeAction::Dispute => current.disputed(amount),
+            DisputeAction::Resolve => current.resolved(amount),
+            DisputeAction::Chargeback => current.charged_back(amount),
+        }
+        .ok_or(Rejection::Overflow)?;
+
+        self.accounts.insert(client, updated);
+        self.store.set_dispute_state(tx, next);
+        Ok(())
+    }
+
     /// The engine's account and store state, for tests (C4).
     #[cfg(test)]
     pub(crate) fn parts(&self) -> (&BTreeMap<ClientId, Account>, &Store) {
@@ -179,6 +258,27 @@ mod tests {
             client: ClientId(client),
             tx: TxId(tx),
             amount: amount(value),
+        }
+    }
+
+    fn dispute(client: u16, tx: u32) -> Transaction {
+        Transaction::Dispute {
+            client: ClientId(client),
+            tx: TxId(tx),
+        }
+    }
+
+    fn resolve(client: u16, tx: u32) -> Transaction {
+        Transaction::Resolve {
+            client: ClientId(client),
+            tx: TxId(tx),
+        }
+    }
+
+    fn chargeback(client: u16, tx: u32) -> Transaction {
+        Transaction::Chargeback {
+            client: ClientId(client),
+            tx: TxId(tx),
         }
     }
 
@@ -391,37 +491,6 @@ mod tests {
         );
     }
 
-    /// ADR-0008 L3, L4: on a locked account every withdrawal is rejected as
-    /// locked, even one that also lacks funds, and it still binds its ID.
-    #[test]
-    fn a_withdrawal_on_a_locked_account_is_rejected_as_locked() {
-        let mut engine = Engine::new();
-        let locked =
-            Account::with_balances(Balance::from(amount("5")), Balance::ZERO, true).unwrap();
-        engine.set_account(ClientId(1), locked);
-        let results = run(
-            &mut engine,
-            &[withdrawal(1, 3, "100"), withdrawal(1, 4, "1")],
-        );
-        assert_eq!(
-            results,
-            [Err(Rejection::AccountLocked), Err(Rejection::AccountLocked)]
-        );
-        assert_eq!(state(&engine, 1), row("5.0000", "0.0000", "5.0000", true));
-        let (_, store) = engine.parts();
-        assert_eq!(store.len(), 2);
-    }
-
-    /// ADR-0008 L2: a deposit on a locked account is applied.
-    #[test]
-    fn a_deposit_on_a_locked_account_is_applied() {
-        let mut engine = Engine::new();
-        let locked = Account::with_balances(Balance::ZERO, Balance::ZERO, true).unwrap();
-        engine.set_account(ClientId(1), locked);
-        assert_eq!(run(&mut engine, &[deposit(1, 1, "2")]), [Ok(())]);
-        assert_eq!(state(&engine, 1), row("2.0000", "0.0000", "2.0000", true));
-    }
-
     /// I6: a deposit that would overflow is ignored: no balance change, no
     /// bound ID, and no account for an unseen client.
     #[test]
@@ -451,65 +520,592 @@ mod tests {
         assert!(run(&mut engine, &rows).iter().all(Result::is_ok));
     }
 
-    /// Dispute-related rows are not handled yet (E4) and change nothing.
+    // Dispute lifecycle (ADR-0006) and locked accounts (ADR-0008). Each test
+    // reproduces the catalog row it is named after (requirements §6) and
+    // states the rules it covers.
+
+    /// A1, ADR-0006 R2: the debt of a withdrawn and charged-back deposit
+    /// stays visible.
     #[test]
-    fn dispute_related_rows_are_not_yet_supported() {
+    fn a1_withdraw_then_chargeback() {
         let mut engine = Engine::new();
-        run(&mut engine, &[deposit(1, 1, "5")]);
+        let results = run(
+            &mut engine,
+            &[deposit(1, 1, "100"), withdrawal(1, 2, "100"), dispute(1, 1)],
+        );
+        assert!(results.iter().all(Result::is_ok));
+        assert_eq!(
+            state(&engine, 1),
+            row("-100.0000", "100.0000", "0.0000", false)
+        );
+        assert_eq!(run(&mut engine, &[chargeback(1, 1)]), [Ok(())]);
+        assert_eq!(
+            state(&engine, 1),
+            row("-100.0000", "0.0000", "-100.0000", true)
+        );
+    }
+
+    /// A2, ADR-0006 R2: no withdrawal while `available` is negative; the
+    /// resolve restores the account.
+    #[test]
+    fn a2_withdrawal_rejected_while_available_is_negative() {
+        let mut engine = Engine::new();
+        run(
+            &mut engine,
+            &[deposit(1, 1, "100"), withdrawal(1, 2, "100"), dispute(1, 1)],
+        );
+        assert_eq!(
+            run(&mut engine, &[withdrawal(1, 3, "10")]),
+            [Err(Rejection::InsufficientFunds)]
+        );
+        assert_eq!(
+            state(&engine, 1),
+            row("-100.0000", "100.0000", "0.0000", false)
+        );
+        assert_eq!(run(&mut engine, &[resolve(1, 1)]), [Ok(())]);
+        assert_eq!(state(&engine, 1), row("0.0000", "0.0000", "0.0000", false));
+    }
+
+    /// A3, ADR-0006 R1: a withdrawal is never disputable.
+    #[test]
+    fn a3_rows_on_a_withdrawal_are_ignored() {
+        let mut engine = Engine::new();
+        run(&mut engine, &[deposit(1, 1, "100"), withdrawal(1, 2, "40")]);
+        let results = run(
+            &mut engine,
+            &[dispute(1, 2), resolve(1, 2), chargeback(1, 2)],
+        );
+        assert_eq!(results, [Err(Rejection::NotADeposit); 3]);
+        assert_eq!(
+            state(&engine, 1),
+            row("60.0000", "0.0000", "60.0000", false)
+        );
+    }
+
+    /// A4, ADR-0006 R3, R8: another client cannot dispute the deposit, and
+    /// the ignored row opens no account.
+    #[test]
+    fn a4_cross_client_dispute_is_ignored() {
+        let mut engine = Engine::new();
+        run(&mut engine, &[deposit(1, 1, "10")]);
+        assert_eq!(
+            run(&mut engine, &[dispute(2, 1)]),
+            [Err(Rejection::ClientMismatch { owner: ClientId(1) })]
+        );
+        assert_eq!(
+            state(&engine, 1),
+            row("10.0000", "0.0000", "10.0000", false)
+        );
+        assert_eq!(state(&engine, 2), None);
+    }
+
+    /// A5, ADR-0006 R3: another client can neither resolve nor charge back
+    /// an open dispute.
+    #[test]
+    fn a5_cross_client_resolve_and_chargeback_are_ignored() {
+        let mut engine = Engine::new();
+        run(&mut engine, &[deposit(1, 1, "10"), dispute(1, 1)]);
+        let results = run(&mut engine, &[resolve(2, 1), chargeback(2, 1)]);
+        assert_eq!(
+            results,
+            [Err(Rejection::ClientMismatch { owner: ClientId(1) }); 2]
+        );
+        assert_eq!(
+            state(&engine, 1),
+            row("0.0000", "10.0000", "10.0000", false)
+        );
+        assert_eq!(state(&engine, 2), None);
+    }
+
+    /// A6, ADR-0006 R7, R8: a dispute on an unknown `tx` is ignored and opens
+    /// no account.
+    #[test]
+    fn a6_dispute_on_unknown_tx_opens_no_account() {
+        let mut engine = Engine::new();
+        assert_eq!(
+            run(&mut engine, &[dispute(9, 7)]),
+            [Err(Rejection::UnknownTx)]
+        );
+        assert_eq!(engine.accounts().count(), 0);
+    }
+
+    /// A7, ADR-0006 R4: a deposit is never held twice.
+    #[test]
+    fn a7_second_dispute_is_ignored() {
+        let mut engine = Engine::new();
+        let results = run(
+            &mut engine,
+            &[deposit(1, 1, "10"), dispute(1, 1), dispute(1, 1)],
+        );
+        assert_eq!(results[2], Err(Rejection::AlreadyDisputed));
+        assert_eq!(
+            state(&engine, 1),
+            row("0.0000", "10.0000", "10.0000", false)
+        );
+    }
+
+    /// A8, ADR-0006 R5: a dispute after a resolve opens a new cycle that can
+    /// be charged back.
+    #[test]
+    fn a8_redispute_after_resolve_opens_a_new_cycle() {
+        let mut engine = Engine::new();
+        let results = run(
+            &mut engine,
+            &[
+                deposit(1, 1, "10"),
+                dispute(1, 1),
+                resolve(1, 1),
+                dispute(1, 1),
+            ],
+        );
+        assert!(results.iter().all(Result::is_ok));
+        assert_eq!(
+            state(&engine, 1),
+            row("0.0000", "10.0000", "10.0000", false)
+        );
+        assert_eq!(run(&mut engine, &[chargeback(1, 1)]), [Ok(())]);
+        assert_eq!(state(&engine, 1), row("0.0000", "0.0000", "0.0000", true));
+    }
+
+    /// A9, ADR-0006 R6: a charged-back deposit is final; only the first
+    /// chargeback applies.
+    #[test]
+    fn a9_charged_back_is_terminal() {
+        let mut engine = Engine::new();
+        run(
+            &mut engine,
+            &[
+                deposit(1, 1, "10"),
+                deposit(1, 2, "5"),
+                dispute(1, 1),
+                chargeback(1, 1),
+            ],
+        );
+        let results = run(
+            &mut engine,
+            &[chargeback(1, 1), dispute(1, 1), resolve(1, 1)],
+        );
+        assert_eq!(results, [Err(Rejection::AlreadyChargedBack); 3]);
+        assert_eq!(state(&engine, 1), row("5.0000", "0.0000", "5.0000", true));
+    }
+
+    /// A10, ADR-0006 R7: rows on a rejected withdrawal, an unknown `tx`, or a
+    /// deposit not under dispute are ignored.
+    #[test]
+    fn a10_rows_without_a_disputable_target_are_ignored() {
+        let mut engine = Engine::new();
+        run(&mut engine, &[deposit(1, 1, "5"), withdrawal(1, 2, "10")]);
+        let results = run(
+            &mut engine,
+            &[
+                dispute(1, 2),
+                dispute(1, 99),
+                resolve(1, 1),
+                chargeback(1, 1),
+            ],
+        );
+        assert_eq!(
+            results,
+            [
+                Err(Rejection::UnknownTx),
+                Err(Rejection::UnknownTx),
+                Err(Rejection::NotDisputed),
+                Err(Rejection::NotDisputed),
+            ]
+        );
+        assert_eq!(state(&engine, 1), row("5.0000", "0.0000", "5.0000", false));
+    }
+
+    /// A11, ADR-0006 R9, ADR-0008 L2, L3: a locked account accepts a deposit
+    /// and rejects a withdrawal.
+    #[test]
+    fn a11_locked_account_accepts_deposits_and_rejects_withdrawals() {
+        let mut engine = Engine::new();
+        run(
+            &mut engine,
+            &[
+                deposit(1, 1, "10"),
+                deposit(1, 2, "5"),
+                dispute(1, 1),
+                chargeback(1, 1),
+            ],
+        );
+        assert_eq!(state(&engine, 1), row("5.0000", "0.0000", "5.0000", true));
+        let results = run(&mut engine, &[deposit(1, 3, "20"), withdrawal(1, 4, "5")]);
+        assert_eq!(results, [Ok(()), Err(Rejection::AccountLocked)]);
+        assert_eq!(state(&engine, 1), row("25.0000", "0.0000", "25.0000", true));
+    }
+
+    /// A12, ADR-0006 R9, ADR-0008 L5: dispute-related rows keep working on a
+    /// locked account.
+    #[test]
+    fn a12_resolve_on_a_locked_account_applies() {
+        let mut engine = Engine::new();
+        let results = run(
+            &mut engine,
+            &[
+                deposit(1, 1, "10"),
+                deposit(1, 2, "10"),
+                dispute(1, 1),
+                dispute(1, 2),
+                chargeback(1, 1),
+            ],
+        );
+        assert!(results.iter().all(Result::is_ok));
+        assert_eq!(state(&engine, 1), row("0.0000", "10.0000", "10.0000", true));
+        assert_eq!(run(&mut engine, &[resolve(1, 2)]), [Ok(())]);
+        assert_eq!(state(&engine, 1), row("10.0000", "0.0000", "10.0000", true));
+    }
+
+    /// A13, ADR-0006 R2, R9, ADR-0008 L1: a deposit repays the debt, but the
+    /// lock stays and withdrawals stay rejected.
+    #[test]
+    fn a13_repaying_the_debt_never_unlocks() {
+        let mut engine = Engine::new();
+        run(
+            &mut engine,
+            &[
+                deposit(1, 1, "100"),
+                withdrawal(1, 2, "100"),
+                dispute(1, 1),
+                chargeback(1, 1),
+            ],
+        );
+        let results = run(&mut engine, &[deposit(1, 3, "150"), withdrawal(1, 4, "10")]);
+        assert_eq!(results, [Ok(()), Err(Rejection::AccountLocked)]);
+        assert_eq!(state(&engine, 1), row("50.0000", "0.0000", "50.0000", true));
+    }
+
+    /// A14, ADR-0006 R2, R5: a second cycle after a resolve and a withdrawal
+    /// records the debt and locks.
+    #[test]
+    fn a14_redispute_after_withdrawal_records_the_debt() {
+        let mut engine = Engine::new();
+        run(
+            &mut engine,
+            &[
+                deposit(1, 1, "100"),
+                dispute(1, 1),
+                resolve(1, 1),
+                withdrawal(1, 2, "100"),
+            ],
+        );
+        assert_eq!(state(&engine, 1), row("0.0000", "0.0000", "0.0000", false));
+        assert_eq!(run(&mut engine, &[dispute(1, 1)]), [Ok(())]);
+        assert_eq!(
+            state(&engine, 1),
+            row("-100.0000", "100.0000", "0.0000", false)
+        );
+        assert_eq!(run(&mut engine, &[chargeback(1, 1)]), [Ok(())]);
+        assert_eq!(
+            state(&engine, 1),
+            row("-100.0000", "0.0000", "-100.0000", true)
+        );
+    }
+
+    /// A23, ADR-0008 L5, ADR-0006 R2: every chargeback after the first still
+    /// applies, so the full debt shows.
+    #[test]
+    fn a23_later_chargebacks_apply_on_a_locked_account() {
+        let mut engine = Engine::new();
+        let results = run(
+            &mut engine,
+            &[
+                deposit(1, 1, "100"),
+                deposit(1, 2, "100"),
+                deposit(1, 3, "100"),
+                withdrawal(1, 4, "300"),
+                dispute(1, 1),
+                dispute(1, 2),
+                dispute(1, 3),
+                chargeback(1, 1),
+            ],
+        );
+        assert!(results.iter().all(Result::is_ok));
+        assert_eq!(
+            state(&engine, 1),
+            row("-300.0000", "200.0000", "-100.0000", true)
+        );
+        let results = run(&mut engine, &[chargeback(1, 2), chargeback(1, 3)]);
+        assert_eq!(results, [Ok(()), Ok(())]);
+        assert_eq!(
+            state(&engine, 1),
+            row("-300.0000", "0.0000", "-300.0000", true)
+        );
+    }
+
+    /// A24, ADR-0008 L1, L2, L5: a deposit made after the lock is applied and
+    /// stays disputable; its chargeback leaves the lock in place.
+    #[test]
+    fn a24_deposit_after_the_lock_is_disputable() {
+        let mut engine = Engine::new();
+        run(
+            &mut engine,
+            &[deposit(1, 1, "10"), dispute(1, 1), chargeback(1, 1)],
+        );
+        assert_eq!(state(&engine, 1), row("0.0000", "0.0000", "0.0000", true));
+        assert_eq!(run(&mut engine, &[deposit(1, 2, "50")]), [Ok(())]);
+        assert_eq!(state(&engine, 1), row("50.0000", "0.0000", "50.0000", true));
+        assert_eq!(run(&mut engine, &[dispute(1, 2)]), [Ok(())]);
+        assert_eq!(state(&engine, 1), row("0.0000", "50.0000", "50.0000", true));
+        assert_eq!(run(&mut engine, &[chargeback(1, 2)]), [Ok(())]);
+        assert_eq!(state(&engine, 1), row("0.0000", "0.0000", "0.0000", true));
+    }
+
+    /// A25, ADR-0008 L3, L4, L7, ADR-0006 R7: every withdrawal on a locked
+    /// account is rejected as locked, even one that also lacks funds, and is
+    /// never stored as disputable.
+    #[test]
+    fn a25_locked_withdrawals_report_the_lock() {
+        let mut engine = Engine::new();
+        run(
+            &mut engine,
+            &[
+                deposit(1, 1, "10"),
+                deposit(1, 2, "5"),
+                dispute(1, 1),
+                chargeback(1, 1),
+            ],
+        );
+        assert_eq!(state(&engine, 1), row("5.0000", "0.0000", "5.0000", true));
+        let results = run(
+            &mut engine,
+            &[
+                withdrawal(1, 3, "100"),
+                withdrawal(1, 4, "1"),
+                dispute(1, 3),
+            ],
+        );
+        assert_eq!(
+            results,
+            [
+                Err(Rejection::AccountLocked),
+                Err(Rejection::AccountLocked),
+                Err(Rejection::UnknownTx),
+            ]
+        );
+        assert_eq!(state(&engine, 1), row("5.0000", "0.0000", "5.0000", true));
+    }
+
+    /// A27, ADR-0010 V6, ADR-0006 R3: a duplicate deposit cannot take over
+    /// the ID, so the other client's dispute is ignored.
+    #[test]
+    fn a27_duplicate_deposit_cannot_take_over_the_id() {
+        let mut engine = Engine::new();
+        let results = run(
+            &mut engine,
+            &[deposit(1, 1, "10"), deposit(2, 1, "50"), dispute(2, 1)],
+        );
+        assert_eq!(
+            results,
+            [
+                Ok(()),
+                Err(Rejection::DuplicateTx { owner: ClientId(1) }),
+                Err(Rejection::ClientMismatch { owner: ClientId(1) }),
+            ]
+        );
+        assert_eq!(
+            state(&engine, 1),
+            row("10.0000", "0.0000", "10.0000", false)
+        );
+        assert_eq!(state(&engine, 2), None);
+    }
+
+    /// A28, ADR-0010 V6, ADR-0006 R6: a repeated deposit cannot reset a
+    /// charged-back deposit.
+    #[test]
+    fn a28_repeated_deposit_cannot_reset_a_chargeback() {
+        let mut engine = Engine::new();
+        run(
+            &mut engine,
+            &[deposit(1, 1, "10"), dispute(1, 1), chargeback(1, 1)],
+        );
+        let results = run(&mut engine, &[deposit(1, 1, "10"), dispute(1, 1)]);
+        assert_eq!(
+            results,
+            [
+                Err(Rejection::DuplicateTx { owner: ClientId(1) }),
+                Err(Rejection::AlreadyChargedBack),
+            ]
+        );
+        assert_eq!(state(&engine, 1), row("0.0000", "0.0000", "0.0000", true));
+    }
+
+    /// A38, ADR-0006 R7: once resolved, a second resolve and a chargeback are
+    /// ignored and the account stays unlocked.
+    #[test]
+    fn a38_resolve_and_chargeback_after_resolve_are_ignored() {
+        let mut engine = Engine::new();
+        run(
+            &mut engine,
+            &[deposit(1, 1, "10"), dispute(1, 1), resolve(1, 1)],
+        );
+        assert_eq!(
+            state(&engine, 1),
+            row("10.0000", "0.0000", "10.0000", false)
+        );
+        let results = run(&mut engine, &[resolve(1, 1), chargeback(1, 1)]);
+        assert_eq!(results, [Err(Rejection::NotDisputed); 2]);
+        assert_eq!(
+            state(&engine, 1),
+            row("10.0000", "0.0000", "10.0000", false)
+        );
+    }
+
+    /// A39, requirements §5: held funds cannot be withdrawn; a withdrawal of
+    /// exactly `available` is applied.
+    #[test]
+    fn a39_held_funds_cannot_be_withdrawn() {
+        let mut engine = Engine::new();
+        run(
+            &mut engine,
+            &[deposit(1, 1, "100"), deposit(1, 2, "50"), dispute(1, 1)],
+        );
+        assert_eq!(
+            state(&engine, 1),
+            row("50.0000", "100.0000", "150.0000", false)
+        );
+        let results = run(
+            &mut engine,
+            &[withdrawal(1, 3, "50.0001"), withdrawal(1, 4, "50")],
+        );
+        assert_eq!(results, [Err(Rejection::InsufficientFunds), Ok(())]);
+        assert_eq!(
+            state(&engine, 1),
+            row("0.0000", "100.0000", "100.0000", false)
+        );
+    }
+
+    /// A41, ADR-0010 V6, ADR-0006 R3: the first row in the file owns the ID.
+    #[test]
+    fn a41_first_row_owns_the_id() {
+        let mut engine = Engine::new();
+        let results = run(
+            &mut engine,
+            &[deposit(2, 1, "50"), deposit(1, 1, "10"), dispute(1, 1)],
+        );
+        assert_eq!(
+            results,
+            [
+                Ok(()),
+                Err(Rejection::DuplicateTx { owner: ClientId(2) }),
+                Err(Rejection::ClientMismatch { owner: ClientId(2) }),
+            ]
+        );
+        assert_eq!(
+            state(&engine, 2),
+            row("50.0000", "0.0000", "50.0000", false)
+        );
+        assert_eq!(state(&engine, 1), None);
+    }
+
+    /// A46, ADR-0016 G1 to G3, ADR-0006 R3: ownership is checked right after
+    /// the lookup, so another client learns nothing about the kind or state
+    /// of a transaction; a rejected withdrawal is unknown to everyone.
+    #[test]
+    fn a46_ownership_is_checked_before_kind_and_state() {
+        let mut engine = Engine::new();
+        let results = run(
+            &mut engine,
+            &[
+                deposit(1, 1, "10"),
+                withdrawal(1, 2, "1"),
+                deposit(1, 3, "1"),
+                dispute(1, 3),
+                chargeback(1, 3),
+                withdrawal(1, 4, "50"),
+            ],
+        );
+        assert_eq!(results[5], Err(Rejection::AccountLocked));
         let before = snapshot(&engine);
-        let rows = [
-            Transaction::Dispute {
-                client: ClientId(1),
-                tx: TxId(1),
-            },
-            Transaction::Resolve {
-                client: ClientId(1),
-                tx: TxId(1),
-            },
-            Transaction::Chargeback {
-                client: ClientId(1),
-                tx: TxId(1),
-            },
-            Transaction::Dispute {
-                client: ClientId(9),
-                tx: TxId(7),
-            },
-        ];
-        for result in run(&mut engine, &rows) {
-            assert_eq!(result, Err(Rejection::NotYetSupported));
-        }
+        let results = run(
+            &mut engine,
+            &[dispute(2, 2), resolve(2, 1), dispute(2, 3), dispute(2, 4)],
+        );
+        let mismatch = Err(Rejection::ClientMismatch { owner: ClientId(1) });
+        assert_eq!(
+            results,
+            [mismatch, mismatch, mismatch, Err(Rejection::UnknownTx)]
+        );
+        assert_eq!(snapshot(&engine), before);
+        assert_eq!(state(&engine, 1), row("9.0000", "0.0000", "9.0000", true));
+        assert_eq!(state(&engine, 2), None);
+    }
+
+    /// I3: an ignored dispute-related row leaves every balance and every
+    /// transaction state unchanged.
+    #[test]
+    fn i3_an_ignored_dispute_row_changes_nothing() {
+        let mut engine = Engine::new();
+        run(
+            &mut engine,
+            &[deposit(1, 1, "10"), withdrawal(1, 2, "1"), dispute(1, 1)],
+        );
+        let before = snapshot(&engine);
+        let results = run(
+            &mut engine,
+            &[
+                dispute(1, 1),
+                dispute(1, 2),
+                dispute(2, 1),
+                dispute(1, 9),
+                resolve(1, 2),
+            ],
+        );
+        assert!(results.iter().all(Result::is_err));
         assert_eq!(snapshot(&engine), before);
     }
 
-    /// One generated row: a deposit or withdrawal over small pools of
-    /// clients, IDs, and amounts, so duplicates and refusals are common.
+    /// I6, ADR-0007 M7: a dispute whose effect would overflow is ignored and
+    /// leaves the deposit's state unchanged.
+    #[test]
+    fn i6_an_overflowing_dispute_changes_nothing() {
+        let mut engine = Engine::new();
+        run(&mut engine, &[deposit(1, 1, "1")]);
+        let floor =
+            Account::with_balances(Balance::from_units(i128::MIN), Balance::ZERO, false).unwrap();
+        engine.set_account(ClientId(1), floor);
+        let before = snapshot(&engine);
+        assert_eq!(engine.apply(dispute(1, 1)), Err(Rejection::Overflow));
+        assert_eq!(snapshot(&engine), before);
+    }
+
+    /// One generated row of any of the five types over small pools of
+    /// clients, IDs, and amounts, so duplicates, refusals, cross-client
+    /// references, and every dispute transition are common (ADR-0014 T11).
     fn any_row() -> impl Strategy<Value = Transaction> {
-        (any::<bool>(), 0_u16..4, 0_u32..24, 1_u64..=50_000).prop_map(
-            |(is_deposit, client, tx, units)| {
-                let text = format!("{}.{:04}", units / 10_000, units % 10_000);
-                let amount = Amount::parse(text.as_bytes()).unwrap();
-                let (client, tx) = (ClientId(client), TxId(tx));
-                if is_deposit {
-                    Transaction::Deposit { client, tx, amount }
-                } else {
-                    Transaction::Withdrawal { client, tx, amount }
-                }
-            },
-        )
+        (0_u8..5, 0_u16..4, 0_u32..24, 1_u64..=50_000).prop_map(|(kind, client, tx, units)| {
+            let text = format!("{}.{:04}", units / 10_000, units % 10_000);
+            let amount = Amount::parse(text.as_bytes()).unwrap();
+            let (client, tx) = (ClientId(client), TxId(tx));
+            match kind {
+                0 => Transaction::Deposit { client, tx, amount },
+                1 => Transaction::Withdrawal { client, tx, amount },
+                2 => Transaction::Dispute { client, tx },
+                3 => Transaction::Resolve { client, tx },
+                _ => Transaction::Chargeback { client, tx },
+            }
+        })
     }
 
     proptest! {
-        /// I1 and I3 over random deposit and withdrawal streams.
+        /// I1, I2, and I3 over random streams of all five row types.
         ///
-        /// Covers: I1, I3, I11, I13.
+        /// Covers: I1, I2, I3, I4, I11, I13.
         #[test]
-        fn i1_i3_hold_after_every_row(rows in prop::collection::vec(any_row(), 0..64)) {
+        fn i1_i2_i3_hold_after_every_row(rows in prop::collection::vec(any_row(), 0..64)) {
             let mut engine = Engine::new();
             for row in rows {
                 let (accounts_before, store_before) = snapshot(&engine);
                 let result = engine.apply(row);
                 assert_invariants(&engine);
                 let (accounts_after, store_after) = snapshot(&engine);
+                // I2: no account goes from locked back to unlocked.
+                for (client, before) in &accounts_before {
+                    if before.is_locked() {
+                        prop_assert!(accounts_after.get(client).is_some_and(Account::is_locked));
+                    }
+                }
                 match (result, row) {
                     (Ok(()), _) => {}
                     (

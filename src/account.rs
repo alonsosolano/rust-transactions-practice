@@ -14,7 +14,8 @@ use crate::amount::{Amount, Balance};
 /// derives `total` as `available + held` with checked arithmetic and refuses
 /// any state where a value would overflow (ADR-0015 P9). So
 /// `total = available + held` (invariant I1) holds for every account that can
-/// exist. There is no method that sets `locked` back to `false` (I2).
+/// exist. Only [`Account::charged_back`] sets `locked`, and no method sets it
+/// back to `false` (I2).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Account {
     available: Balance,
@@ -104,6 +105,47 @@ impl Account {
             .checked_sub(amount)
             .and_then(|available| Self::from_parts(available, self.held, self.locked))
             .ok_or(WithdrawalError::Overflow)
+    }
+
+    /// The account after a dispute on a deposit of `amount` (ADR-0006).
+    ///
+    /// Moves the full amount from `available` to `held`, even if `available`
+    /// goes negative (R2); `total` is unchanged. Applies the same way on a
+    /// locked account (ADR-0008 L5). Returns `None` if a balance would
+    /// overflow (ADR-0007 M7).
+    #[must_use]
+    pub fn disputed(&self, amount: Amount) -> Option<Self> {
+        let amount = Balance::from(amount);
+        let available = self.available.checked_sub(amount)?;
+        let held = self.held.checked_add(amount)?;
+        Self::from_parts(available, held, self.locked)
+    }
+
+    /// The account after a resolve on a disputed deposit of `amount`
+    /// (ADR-0006).
+    ///
+    /// Moves the amount from `held` back to `available`; `total` is
+    /// unchanged. A resolve never unlocks the account (ADR-0008 L1). Returns
+    /// `None` if a balance would overflow (ADR-0007 M7).
+    #[must_use]
+    pub fn resolved(&self, amount: Amount) -> Option<Self> {
+        let amount = Balance::from(amount);
+        let available = self.available.checked_add(amount)?;
+        let held = self.held.checked_sub(amount)?;
+        Self::from_parts(available, held, self.locked)
+    }
+
+    /// The account after a chargeback on a disputed deposit of `amount`
+    /// (ADR-0006).
+    ///
+    /// Removes the amount from `held`, so `total` falls by the same amount and
+    /// may go negative (R2). The account is locked; an account that is
+    /// already locked stays locked (ADR-0008 L1, L5). Returns `None` if a
+    /// balance would overflow (ADR-0007 M7).
+    #[must_use]
+    pub fn charged_back(&self, amount: Amount) -> Option<Self> {
+        let held = self.held.checked_sub(Balance::from(amount))?;
+        Self::from_parts(self.available, held, true)
     }
 
     /// An account with the given balances, for tests that need states no
@@ -245,6 +287,101 @@ mod tests {
             account.withdrawn(Amount::MIN),
             Err(WithdrawalError::InsufficientFunds)
         );
+    }
+
+    /// ADR-0006: a dispute moves the amount from `available` to `held` and
+    /// keeps `total`.
+    #[test]
+    fn a_dispute_moves_funds_to_held() {
+        let account = Account::default().deposited(amount("10")).unwrap();
+        let account = account.disputed(amount("4")).unwrap();
+        assert_eq!(account.available(), balance("6"));
+        assert_eq!(account.held(), balance("4"));
+        assert_eq!(account.total(), balance("10"));
+        assert!(!account.is_locked());
+        assert_total(&account);
+    }
+
+    /// ADR-0006 R2: the full amount is held even when `available` goes
+    /// negative.
+    #[test]
+    fn r2_a_dispute_holds_the_full_amount_even_below_zero() {
+        let account = Account::default().disputed(amount("100")).unwrap();
+        assert_eq!(
+            account.available(),
+            Balance::ZERO.checked_sub(balance("100")).unwrap()
+        );
+        assert_eq!(account.held(), balance("100"));
+        assert_eq!(account.total(), Balance::ZERO);
+        assert_total(&account);
+    }
+
+    /// ADR-0006: a resolve moves the amount back from `held` to `available`.
+    #[test]
+    fn a_resolve_releases_held_funds() {
+        let account = Account::default().deposited(amount("10")).unwrap();
+        let account = account.disputed(amount("10")).unwrap();
+        let account = account.resolved(amount("10")).unwrap();
+        assert_eq!(account, Account::default().deposited(amount("10")).unwrap());
+    }
+
+    /// ADR-0008 L1: a resolve on a locked account leaves it locked.
+    #[test]
+    fn l1_a_resolve_never_unlocks() {
+        let account = Account::with_balances(Balance::ZERO, balance("5"), true).unwrap();
+        let account = account.resolved(amount("5")).unwrap();
+        assert_eq!(account.available(), balance("5"));
+        assert!(account.is_locked());
+    }
+
+    /// ADR-0006: a chargeback removes the held amount from `total` and locks.
+    #[test]
+    fn a_chargeback_debits_held_and_locks() {
+        let account = Account::default().deposited(amount("10")).unwrap();
+        let account = account.disputed(amount("10")).unwrap();
+        let account = account.charged_back(amount("10")).unwrap();
+        assert_eq!(account.available(), Balance::ZERO);
+        assert_eq!(account.held(), Balance::ZERO);
+        assert_eq!(account.total(), Balance::ZERO);
+        assert!(account.is_locked());
+        assert_total(&account);
+    }
+
+    /// ADR-0008 L5: a chargeback on a locked account applies and the lock
+    /// stays.
+    #[test]
+    fn l5_a_chargeback_on_a_locked_account_applies() {
+        let account = Account::with_balances(Balance::ZERO, balance("7"), true).unwrap();
+        let account = account.charged_back(amount("7")).unwrap();
+        assert_eq!(account.held(), Balance::ZERO);
+        assert_eq!(account.total(), Balance::ZERO);
+        assert!(account.is_locked());
+    }
+
+    /// I6: a dispute that would push `available` below `i128::MIN` is
+    /// refused, not wrapped.
+    #[test]
+    fn i6_a_dispute_that_would_overflow_is_refused() {
+        let floor = Balance::from_units(i128::MIN);
+        let account = Account::with_balances(floor, Balance::ZERO, false).unwrap();
+        assert_eq!(account.disputed(Amount::MIN), None);
+    }
+
+    /// I6: a resolve that would push `available` above `i128::MAX` is
+    /// refused.
+    #[test]
+    fn i6_a_resolve_that_would_overflow_is_refused() {
+        let near_max = Balance::from_units(i128::MAX);
+        let account = Account::with_balances(near_max, Balance::ZERO, false).unwrap();
+        assert_eq!(account.resolved(Amount::MIN), None);
+    }
+
+    /// I6: a chargeback that would push `held` below `i128::MIN` is refused.
+    #[test]
+    fn i6_a_chargeback_that_would_overflow_is_refused() {
+        let floor = Balance::from_units(i128::MIN);
+        let account = Account::with_balances(Balance::ZERO, floor, false).unwrap();
+        assert_eq!(account.charged_back(Amount::MIN), None);
     }
 
     /// ADR-0015 P9 records this size for the memory estimate of ADR-0011.

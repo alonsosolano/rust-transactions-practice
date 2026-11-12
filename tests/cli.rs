@@ -155,6 +155,29 @@ fn deposits_and_withdrawals_sample_case() -> TestResult {
     run_case("deposits-and-withdrawals")
 }
 
+/// A1, ADR-0006 R2, ADR-0008 L6: a deposit is withdrawn, then disputed and
+/// charged back. The locked account is printed like any other, with its
+/// negative balance and `locked` set to `true`; another client is untouched.
+#[test]
+fn a1_withdraw_then_chargeback_sample_case() -> TestResult {
+    run_case("a1-withdraw-then-chargeback")
+}
+
+/// ADR-0006: held funds cannot be withdrawn while disputed, and the resolve
+/// releases them.
+#[test]
+fn dispute_then_resolve_sample_case() -> TestResult {
+    run_case("dispute-then-resolve")
+}
+
+/// ADR-0006, ADR-0008 L2, L3: a chargeback locks the account, a later deposit
+/// is applied, and a withdrawal is rejected. Another client's dispute stays
+/// open in `held`.
+#[test]
+fn dispute_then_chargeback_sample_case() -> TestResult {
+    run_case("dispute-then-chargeback")
+}
+
 /// ADR-0010 V8, V10: a file that is not this CSV (here `Cargo.toml`) has the
 /// wrong header and exits 65 with one escaped stderr line.
 #[test]
