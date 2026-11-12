@@ -1,0 +1,15 @@
+# Clippy configuration (ADR-0012). The lint levels live in Cargo.toml.
+
+# S10: tests may panic, index, and print.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-print-in-tests = true
+allow-dbg-in-tests = true
+
+# S7: no floating point anywhere (ADR-0007 M8).
+disallowed-types = [
+  { path = "f32", reason = "no floating point (ADR-0007 M8)" },
+  { path = "f64", reason = "no floating point (ADR-0007 M8)" },
+]
