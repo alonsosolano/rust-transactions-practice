@@ -101,10 +101,10 @@ The hasher accounts for at most a tenth of the run time; reading and validating 
 
 ## Reproduce
 
-Build once, then generate, measure, and delete each input. A 100 million row input takes 2.8 GB (`stateless`) or 3.4 GB (`mixed`) of disk.
+Build the engine and both examples once, then generate, measure, and delete each input. `--bins` is needed because `--examples` alone does not build the engine binary. A 100 million row input takes 2.8 GB (`stateless`) or 3.4 GB (`mixed`) of disk.
 
 ```sh
-cargo build --release --examples
+cargo build --release --bins --examples
 ```
 
 ```sh
