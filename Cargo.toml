@@ -7,4 +7,43 @@ rust-version = "1.85"
 # Never published to crates.io (also lets cargo-deny skip the license check).
 publish = false
 
+# Exactly the dependencies of ADR-0012, rule S1. Adding, replacing, or
+# removing one needs a new ADR.
 [dependencies]
+csv = "1.4.0"
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+
+[dev-dependencies]
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }
+
+[lints.rust]
+unsafe_code = "forbid"         # S4
+non_ascii_idents = "forbid"    # S4
+
+[lints.clippy]
+# S6: no panics on bad data
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+# S7: numbers (ADR-0007)
+arithmetic_side_effects = "deny"
+float_arithmetic = "deny"
+as_conversions = "deny"
+disallowed_types = "deny"
+# S8: output only through explicit writers
+print_stdout = "deny"
+print_stderr = "deny"
+dbg_macro = "deny"
+exit = "deny"
+# S9: every exception has a reason
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
+[profile.release]
+overflow-checks = true         # S11
