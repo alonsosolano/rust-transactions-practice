@@ -79,6 +79,7 @@ In total, 8 crates are linked into the binary, 6 run only at compile time, and 1
 | S9 | `#[allow]` is denied. A lint exception uses `#[expect(lint, reason = "...")]` at the narrowest scope (one expression, function, or test module). | Every exception carries its justification, as §8 requires. `expect` also fails the build once the exception is no longer needed, so stale exceptions cannot pile up. |
 | S10 | Tests may use `unwrap`, `expect`, `panic!`, indexing, and printing (via `clippy.toml`), and plain arithmetic. `as` conversions stay denied in tests. Integration test functions return `Result<(), Box<dyn Error>>` and use `?`, because helper functions outside `#[test]` are not covered by the test exemption. | A failing assertion in a test is the desired outcome, not a defect. |
 | S11 | The release profile keeps overflow checks on (`overflow-checks = true`). | Defense in depth behind S7: if an unchecked operation ever slips in, it panics instead of wrapping silently. A crash is visible; a wrong balance is not. |
+| S12 | The lints in S6 to S8 flag specific constructs; they do not prove the absence of panics. A function from the standard library or a dependency can still panic on input it is given, as its documentation lists under "Panics" (for example `str::split_at` on an index that is out of bounds or not on a character boundary). Code that handles input data uses the non-panicking variant where one exists (`split_at_checked`, `get`, `checked_*`). Review checks the "Panics" section of every such API called on input data, and the input-handling functions get property tests on arbitrary input that assert they return an error instead of panicking. | Closes the gap the lints leave, so the §8 no-panic claim rests on lints, review, and tests together. |
 
 ### Lint and build configuration
 
@@ -154,7 +155,8 @@ The lints are `deny` rather than `warn`, so a plain `cargo clippy` already fails
 ### Consequences
 
 * Good, because the binary links 8 crates, all by two maintainers with a long public track record (BurntSushi and dtolnay), and the shipped `unsafe` is concentrated in `memchr`'s SIMD code.
-* Good, because "no panics, no `unsafe`, no floats, no silent overflow" is checked by the compiler on every `cargo clippy`, so reviewers can trust the claim without reading every line.
+* Good, because the constructs that most often panic or lose data (`unwrap`, indexing, `as`, unchecked arithmetic, floats, `unsafe`) are rejected by every `cargo clippy`, so review can focus on what the lints cannot see: panics inside called APIs (S12).
+* Bad, because the no-panic claim still depends on review and tests for those API calls; the lints narrow the search but do not settle it.
 * Good, because every remaining exception is a `#[expect(..., reason = "...")]` that a reviewer can find with one search.
 * Good, because `cargo deny check` catches new advisories against the committed lockfile even when no code changes.
 * Bad, because the strict lints make some code longer: `get(..)` with error handling instead of `v[i]`, `checked_add` instead of `+`, `u64::from` instead of `as`.
@@ -168,7 +170,8 @@ The lints are `deny` rather than `warn`, so a plain `cargo clippy` already fails
 * `cargo clippy --all-targets -- -D warnings` enforces S4 and S6 to S10. A violation fails the build.
 * `cargo deny check` enforces S3. It runs locally whenever `Cargo.toml` or `Cargo.lock` changes, and in the manual CI workflow.
 * The manual CI workflow runs `cargo +1.85.0 check --all-targets --locked` for S5 and uses `--locked` on every cargo command for S2.
-* Review checks: the dependency list in `Cargo.toml` matches the table above (S1); `main` returns `ExitCode` and never calls `std::process::exit`, which clippy's `exit` lint allows inside `main` (S8); every `#[expect]` has a reason that would convince a reviewer (S9).
+* Review checks: the dependency list in `Cargo.toml` matches the table above (S1); `main` returns `ExitCode` and never calls `std::process::exit`, which clippy's `exit` lint allows inside `main` (S8); every `#[expect]` has a reason that would convince a reviewer (S9); every standard-library or dependency function called on input data has been checked for documented panics, and a non-panicking variant is used where one exists (S12).
+* Property tests feed arbitrary strings and records to the input-handling functions (row decoding, amount parsing) and assert that each call returns a value or an error, never a panic (S12).
 * Scenario A16 in [requirements §6](../requirements.md) covers the S8 behavior: a failing stderr never panics and never changes stdout or the exit code.
 
 ## Pros and Cons of the Options

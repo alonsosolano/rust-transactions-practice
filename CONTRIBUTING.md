@@ -46,6 +46,7 @@ It checks the dependency graph against `deny.toml`: RustSec advisories, licenses
 
 - A new dependency needs a new ADR that says why it is needed and why it is trusted.
 - Clippy denies `unsafe`, panicking constructs outside tests, floats, unchecked arithmetic, `as` casts, and `print!`-family macros.
+- Clippy does not catch a panic inside a called function, such as `str::split_at` on a bad index. For code that handles input, check each API's "Panics" section, prefer the non-panicking variant, and cover it with a property test on arbitrary input.
 - `#[allow]` is denied. Use `#[expect(lint, reason = "...")]` at the narrowest scope, so every exception carries its justification.
 
 ## Commit messages

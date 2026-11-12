@@ -44,6 +44,7 @@ Follow [ADR-0012](docs/decisions/0012-dependencies-and-safety-policy.md):
 
 - Do not add, replace, or remove a dependency without a new ADR. Prefer the standard library.
 - No `unsafe`, no `unwrap`/`expect`/`panic!`/indexing outside tests, no floats, no unchecked arithmetic, no `as` casts, no `println!`/`eprintln!`. Clippy enforces all of these.
+- Clippy does not see panics inside called functions. Before calling a standard-library or dependency function on input data, check its "Panics" section and use the non-panicking variant (`split_at_checked`, `get`, `checked_*`).
 - Never use `#[allow]`. If an exception is truly needed, use `#[expect(lint, reason = "...")]` at the narrowest scope.
 
 ## Commits, branches, PRs
