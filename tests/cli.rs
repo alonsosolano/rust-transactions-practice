@@ -1,5 +1,6 @@
-//! Hand-written CLI tests (ADR-0014 T9): behavior only observable through the
-//! process, such as argument handling and exit codes.
+//! CLI tests on the built binary (ADR-0014): the `sample_cases` test over
+//! every case under `tests/cases/` (T3 to T8), and hand-written tests (T9) for
+//! behavior a sample file cannot express, such as argument handling.
 //!
 //! Every fatal case checks the exit code, that stdout is empty, and that
 //! stderr ends with exactly one error line (ADR-0010 V7, V11; invariant I12).
@@ -8,6 +9,8 @@
 
 use std::error::Error;
 use std::ffi::OsStr;
+use std::fs;
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -137,65 +140,186 @@ fn non_utf8_path_exits_66_and_is_escaped() -> TestResult {
     Ok(())
 }
 
-/// Runs one sample case under `tests/cases/` and compares stdout, stderr, and
-/// the exit code with its expected files byte for byte (ADR-0014 T3, T4).
-/// E5 generalizes this into the `sample_cases` test over every case.
-fn run_case(name: &str) -> TestResult {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/cases")
-        .join(name);
-    let output = Command::new(env!("CARGO_BIN_EXE_rust-transactions-practice"))
-        .arg("input.csv")
-        .current_dir(&dir)
-        .stdin(Stdio::null())
-        .output()?;
-    let status = format!("{}\n", output.status.code().ok_or("killed by a signal")?);
-    assert_eq!(
-        String::from_utf8(output.stdout)?,
-        std::fs::read_to_string(dir.join("expected.stdout"))?,
-        "{name}: stdout"
-    );
-    assert_eq!(
-        String::from_utf8(output.stderr)?,
-        std::fs::read_to_string(dir.join("expected.stderr"))?,
-        "{name}: stderr"
-    );
-    assert_eq!(
-        status,
-        std::fs::read_to_string(dir.join("expected.status"))?,
-        "{name}: status"
+/// The files every sample case holds, and nothing else, in sorted order
+/// (ADR-0014 T3).
+const CASE_FILES: [&str; 4] = [
+    "expected.status",
+    "expected.stderr",
+    "expected.stdout",
+    "input.csv",
+];
+
+/// The UTF-8 byte order mark that the A43 input must keep (ADR-0014 T8).
+const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
+
+/// ADR-0014 T3 to T6, T8: runs the binary on every case under `tests/cases/`
+/// and compares stdout, stderr, and the exit code with the case's expected
+/// files byte for byte, with no normalization. Every case runs, and one
+/// failure at the end lists every problem found. Adding a case is adding a
+/// directory; no code changes.
+#[test]
+fn sample_cases() -> TestResult {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases");
+    let mut entries = fs::read_dir(&root)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(fs::DirEntry::file_name);
+
+    let mut cases = Vec::new();
+    let mut problems = Vec::new();
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !entry.file_type()?.is_dir() {
+            problems.push(format!("{name}: not a case directory"));
+            continue;
+        }
+        let case_problems =
+            check_case(&entry.path()).unwrap_or_else(|error| vec![error.to_string()]);
+        problems.extend(
+            case_problems
+                .into_iter()
+                .map(|problem| format!("{name}: {problem}")),
+        );
+        cases.push(name);
+    }
+
+    if cases.is_empty() {
+        problems.push(format!("no sample cases found in {}", root.display()));
+    }
+    problems.extend(check_a43_bytes(&root, &cases));
+
+    assert!(
+        problems.is_empty(),
+        "{} sample-case problem(s):\n{}",
+        problems.len(),
+        problems.join("\n")
     );
     Ok(())
 }
 
-/// Interleaved clients, padded fields, mixed precision, and a withdrawal
-/// rejected for insufficient funds.
-#[test]
-fn deposits_and_withdrawals_sample_case() -> TestResult {
-    run_case("deposits-and-withdrawals")
+/// Checks one case directory and returns its problems; an empty list means
+/// the case passed. An I/O error while reading the case or running the
+/// binary is returned as an error and reported as a problem by the caller.
+fn check_case(dir: &Path) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !entry.file_type()?.is_file() {
+            return Ok(vec![format!("{name} is not a regular file")]);
+        }
+        names.push(name);
+    }
+    names.sort();
+    if names != CASE_FILES {
+        return Ok(vec![format!(
+            "holds {names:?}; a case holds exactly {CASE_FILES:?}"
+        )]);
+    }
+
+    let expected_stdout = fs::read(dir.join("expected.stdout"))?;
+    let expected_stderr = fs::read(dir.join("expected.stderr"))?;
+    let expected_status = match parse_status(&fs::read(dir.join("expected.status"))?) {
+        Some(status) => status,
+        None => {
+            return Ok(vec![
+                "expected.status must be decimal digits followed by one \\n".to_owned(),
+            ]);
+        }
+    };
+    // T6, invariant I12: a failed run leaves stdout empty, so the expected
+    // files of a failing case must say so.
+    if expected_status != 0 && !expected_stdout.is_empty() {
+        return Ok(vec![format!(
+            "expected.status is {expected_status}, so expected.stdout must be empty"
+        )]);
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rust-transactions-practice"))
+        .arg("input.csv")
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .output()?;
+
+    let mut problems = Vec::new();
+    if let Some(difference) = first_difference(&expected_stdout, &output.stdout) {
+        problems.push(format!("stdout: {difference}"));
+    }
+    if let Some(difference) = first_difference(&expected_stderr, &output.stderr) {
+        problems.push(format!("stderr: {difference}"));
+    }
+    match output.status.code() {
+        Some(code) if code == expected_status => {}
+        Some(code) => problems.push(format!("status: expected {expected_status}, actual {code}")),
+        None => problems.push(format!(
+            "status: expected {expected_status}, actual: killed by a signal"
+        )),
+    }
+    Ok(problems)
 }
 
-/// A1, ADR-0006 R2, ADR-0008 L6: a deposit is withdrawn, then disputed and
-/// charged back. The locked account is printed like any other, with its
-/// negative balance and `locked` set to `true`; another client is untouched.
-#[test]
-fn a1_withdraw_then_chargeback_sample_case() -> TestResult {
-    run_case("a1-withdraw-then-chargeback")
+/// Parses `expected.status`: ASCII digits followed by exactly one `\n`.
+fn parse_status(bytes: &[u8]) -> Option<i32> {
+    let digits = bytes.strip_suffix(b"\n")?;
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(digits).ok()?.parse().ok()
 }
 
-/// ADR-0006: held funds cannot be withdrawn while disputed, and the resolve
-/// releases them.
-#[test]
-fn dispute_then_resolve_sample_case() -> TestResult {
-    run_case("dispute-then-resolve")
+/// Describes the first line where `actual` differs from `expected`, or
+/// returns `None` when the bytes are equal. Lines keep their `\n`, so a
+/// difference in line endings is shown too. Both sides are printed with
+/// control and non-ASCII bytes escaped.
+fn first_difference(expected: &[u8], actual: &[u8]) -> Option<String> {
+    if expected == actual {
+        return None;
+    }
+    let mut expected_lines = expected.split_inclusive(|&byte| byte == b'\n');
+    let mut actual_lines = actual.split_inclusive(|&byte| byte == b'\n');
+    for line in 1_usize.. {
+        let (expected_line, actual_line) = (expected_lines.next(), actual_lines.next());
+        if expected_line != actual_line {
+            return Some(format!(
+                "line {line}: expected {}, actual {}",
+                show_line(expected_line),
+                show_line(actual_line)
+            ));
+        }
+        if expected_line.is_none() {
+            break;
+        }
+    }
+    Some("bytes differ".to_owned())
 }
 
-/// ADR-0006, ADR-0008 L2, L3: a chargeback locks the account, a later deposit
-/// is applied, and a withdrawal is rejected. Another client's dispute stays
-/// open in `held`.
-#[test]
-fn dispute_then_chargeback_sample_case() -> TestResult {
-    run_case("dispute-then-chargeback")
+/// Shows one line for a failure report, quoted and escaped.
+fn show_line(line: Option<&[u8]>) -> String {
+    line.map_or_else(
+        || "<no line>".to_owned(),
+        |bytes| format!("\"{}\"", bytes.escape_ascii()),
+    )
+}
+
+/// ADR-0014 T8: the A43 input must still hold a byte order mark and `\r\n`
+/// line endings, so an editor or a git setting that rewrites the file fails
+/// the run instead of silently weakening the case.
+fn check_a43_bytes(root: &Path, cases: &[String]) -> Vec<String> {
+    let Some(case) = cases.iter().find(|name| name.starts_with("a43-")) else {
+        return vec!["no a43-* sample case found".to_owned()];
+    };
+    let input = match fs::read(root.join(case).join("input.csv")) {
+        Ok(input) => input,
+        Err(error) => return vec![format!("{case}: cannot read input.csv: {error}")],
+    };
+    let mut problems = Vec::new();
+    if !input.starts_with(UTF8_BOM) {
+        problems.push(format!(
+            "{case}: input.csv no longer starts with a UTF-8 BOM"
+        ));
+    }
+    if !input.windows(2).any(|pair| pair == b"\r\n") {
+        problems.push(format!("{case}: input.csv no longer contains \\r\\n"));
+    }
+    problems
 }
 
 /// ADR-0010 V8, V10: a file that is not this CSV (here `Cargo.toml`) has the
@@ -220,8 +344,7 @@ fn wrong_header_exits_65() -> TestResult {
 /// never report a false one.
 #[test]
 fn a16_closed_stderr_pipe_changes_nothing() -> TestResult {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/cases/deposits-and-withdrawals");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases/deposits-and-withdrawals");
     let mut child = Command::new(env!("CARGO_BIN_EXE_rust-transactions-practice"))
         .arg("input.csv")
         .current_dir(&dir)
