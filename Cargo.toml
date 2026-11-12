@@ -47,3 +47,9 @@ allow_attributes_without_reason = "deny"
 
 [profile.release]
 overflow-checks = true         # S11
+
+# ADR-0014 T12: the large-input generator. `test = true` makes `cargo test`
+# run its unit tests (determinism, row counts, profile coverage).
+[[example]]
+name = "generate"
+test = true
