@@ -71,7 +71,7 @@ Amounts follow [ADR-0007](decisions/0007-money-representation.md):
 - Stored as exact fixed-point integers in units of `0.0001`. No floating point is used, and no amount is ever rounded or truncated.
 - Valid form: ASCII digits, optionally followed by `.` and more digits. Extra fractional digits beyond the fourth are accepted only if they are zeros (`1.23450`); leading zeros are accepted (`007.5`).
 - Valid range: `0.0001` to `1844674407370955.1615`.
-- Anything else makes the `deposit` or `withdrawal` row invalid: a sign (`-5`, `+5`), `.5`, `5.`, exponents (`1e3`), separators (`1_000`, `1,000`), zero, more than 4 non-zero fractional digits, or a value above the range. An invalid row never changes state and never creates an account. It is reported like any other skipped row ([ADR-0010](decisions/0010-input-validation-and-errors.md) V1, V11).
+- Anything else makes the `deposit` or `withdrawal` row invalid: a sign (`-5`, `+5`), `.5`, `5.`, exponents (`1e3`), separators (`1_000`, `1,000`), zero, a non-zero digit after the fourth decimal place (`1.00005`), or a value above the range. An invalid row never changes state and never creates an account. It is reported like any other skipped row ([ADR-0010](decisions/0010-input-validation-and-errors.md) V1, V11).
 
 Ordering:
 
