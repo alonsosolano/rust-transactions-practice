@@ -1,0 +1,3 @@
+rejected: line 9: account_locked type=withdrawal client=1 tx=4 amount=1.0000
+summary: skipped=1 rejected=1 ignored=0
+summary: reason=account_locked count=1

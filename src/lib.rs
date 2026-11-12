@@ -78,23 +78,38 @@ pub enum RunError {
 ///
 /// The input is read one line at a time and never held in full (ADR-0011
 /// S3). `output` receives only the output CSV, and only after all input is
-/// processed (ADR-0011 S12). `diagnostics` is meant for the bounded reports
-/// of ADR-0006 R10; until those are built (E10) nothing is written to it.
+/// processed (ADR-0011 S12). `diagnostics` receives the bounded reports of
+/// ADR-0006 R10 in the format of ADR-0017: a line for each of the first
+/// skipped rows, then a summary. The summary is written once the input is no
+/// longer read, even when reading stopped on a fatal error, so the caller's
+/// fatal line comes after it (ADR-0017 D7). Every write to `diagnostics` is
+/// best effort; a failing `diagnostics` never changes the result.
 ///
 /// # Errors
 ///
 /// Returns a [`RunError`] when the run cannot complete. Unless the error is
 /// [`RunError::WriteOutput`], nothing was written to `output`; after a
 /// `WriteOutput` error, `output` must not be trusted.
-pub fn run<R, W, E>(input: R, output: W, _diagnostics: E) -> Result<(), RunError>
+pub fn run<R, W, E>(input: R, output: W, diagnostics: E) -> Result<(), RunError>
 where
     R: Read,
     W: Write,
     E: Write,
 {
+    let mut diagnostics = Diagnostics::new(diagnostics);
+    let processed = process(input, &mut diagnostics);
+    diagnostics.finish();
+    let engine = processed?;
+    output::write_accounts(output, engine.accounts()).map_err(RunError::WriteOutput)
+}
+
+/// Reads every row of `input` into a new engine, reporting each skipped row.
+fn process<R: Read, E: Write>(
+    input: R,
+    diagnostics: &mut Diagnostics<E>,
+) -> Result<Engine, RunError> {
     let mut reader = Reader::new(input)?;
     let mut engine = Engine::new();
-    let mut diagnostics = Diagnostics;
     while let Some(row) = reader.next_row()? {
         match row.outcome {
             Ok(transaction) => {
@@ -102,10 +117,10 @@ where
                     diagnostics.rejected(row.line, &transaction, rejection);
                 }
             }
-            Err(reason) => diagnostics.invalid(row.line, reason),
+            Err(reason) => diagnostics.invalid(row.line, reader.current_line(), reason),
         }
     }
-    output::write_accounts(output, engine.accounts()).map_err(RunError::WriteOutput)
+    Ok(engine)
 }
 
 #[cfg(test)]
@@ -135,7 +150,7 @@ mod tests {
         let mut stderr = Vec::new();
         run(HEADER, &mut stdout, &mut stderr).unwrap();
         assert_eq!(stdout, b"client,available,held,total,locked\n");
-        assert!(stderr.is_empty());
+        assert_eq!(stderr, b"summary: skipped=0 rejected=0 ignored=0\n");
     }
 
     #[test]

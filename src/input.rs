@@ -131,6 +131,14 @@ impl<R: Read> Reader<R> {
         }
     }
 
+    /// The raw bytes of the row last returned by [`Reader::next_row`],
+    /// without its line ending.
+    ///
+    /// The diagnostics echo it, escaped, for an invalid row (ADR-0017 D4).
+    pub fn current_line(&self) -> &[u8] {
+        self.content()
+    }
+
     /// The current line, without a byte order mark on the first line.
     fn content(&self) -> &[u8] {
         if self.line_number == 1 {
@@ -383,6 +391,19 @@ mod tests {
             rows.push(row);
         }
         Ok(rows)
+    }
+
+    /// ADR-0017 D4: after each row, `current_line` is that row's raw bytes
+    /// without the line ending, so the diagnostics echo exactly what arrived.
+    #[test]
+    fn current_line_is_the_raw_row() {
+        let input = b"type,client,tx,amount\r\n\r\nDeposit, 1 ,2,\"3\"\r\nwithdrawal,1,2,\n";
+        let mut reader = Reader::new(&input[..]).unwrap();
+        let row = reader.next_row().unwrap().unwrap();
+        assert_eq!(row.line, 3);
+        assert_eq!(reader.current_line(), b"Deposit, 1 ,2,\"3\"");
+        reader.next_row().unwrap().unwrap();
+        assert_eq!(reader.current_line(), b"withdrawal,1,2,");
     }
 
     /// The outcome of the single data row `line` under a valid header.

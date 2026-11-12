@@ -1,0 +1,3 @@
+rejected: line 5: insufficient_funds type=withdrawal client=1 tx=3 amount=5.0000
+summary: skipped=1 rejected=1 ignored=0
+summary: reason=insufficient_funds count=1

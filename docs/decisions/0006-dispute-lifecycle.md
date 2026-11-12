@@ -197,4 +197,5 @@ Standard controls that the input format cannot express. Adding any of them needs
 * The dispute states are stored as one enum with an exhaustive transition match, as described in [ADR-0011](0011-architecture-and-memory.md) S11; the rules R1 to R10 are unchanged.
 * The test type and priority of each scenario and invariant, and the rule that invariants are checked by tests only, are set by [ADR-0013](0013-attack-and-invariant-catalog.md).
 * The reason code of each ignored row under R1 to R7, and the order in which the rules are checked, are set by [ADR-0016](0016-dispute-row-reasons-and-check-order.md); the rules are unchanged.
+* The exact text of the R10 detailed lines, notice, and summary, and when the summary is written, are set by [ADR-0017](0017-diagnostic-line-format-and-summary.md); R10 is unchanged.
 * Tracked by issue LYA-41 (D3). The attack catalog (D8) and the dispute implementation (E4) build on the scenarios in requirements §6.
