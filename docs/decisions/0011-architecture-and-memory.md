@@ -180,6 +180,8 @@ The standard `HashMap` is a SwissTable (the `hashbrown` crate). It stores each s
 | 1 billion | 2^31 | 50 GiB | 75 GiB | 54 bytes |
 | 2^32 (every ID) | 2^33 | 200 GiB | 300 GiB | 50 bytes |
 
+Measured in E7 ([docs/performance.md](../performance.md)): the table sizes match, but on macOS the peak was up to 2 times the final table, not 1.5 times, at 1 million and 10 million records, because the allocator keeps the freed tables of earlier growth steps resident. At about 90 million records the peak was 1.5 times. Plan for up to 2 times the final table.
+
 For comparison, a deposit row is about 15 to 50 bytes of input, so the store costs roughly one to three times the size of the rows that created it. Dispute, resolve, and chargeback rows add nothing, and neither do invalid or duplicate rows.
 
 #### Accounts and buffers
@@ -200,7 +202,7 @@ If memory runs out while the input is being processed, the allocator aborts the 
 * A 64-bit target, the standard library's `HashMap` and `BTreeMap` of the pinned toolchain, and the layouts above. Allocator overhead is not counted.
 * One record per bound `tx` ID (S10). A duplicate never adds a second record (ADR-0010 V6).
 * No capacity is reserved up front, because the input size does not tell how many rows are deposits or withdrawals.
-* The estimates are checked against measurements in E7. If they differ, this section is updated.
+* The estimates are checked against measurements in E7. If they differ, this section is updated. E7 confirmed the table sizes and the flat memory on rows that bind no ID, and corrected the growth peak as noted under [Transaction store](#transaction-store); the measurements are in [docs/performance.md](../performance.md).
 
 #### Hostile input
 
@@ -351,7 +353,7 @@ flowchart LR
   * TigerBeetle's [performance notes](https://docs.tigerbeetle.com/concepts/performance/): single-threaded by design, because hot accounts make sharding a financial database hard.
   * The [`LinesCodec` documentation](https://docs.rs/tokio-util/latest/tokio_util/codec/struct.LinesCodec.html), which recommends a maximum line length for any codec exposed to untrusted input.
 * Related decisions: duplicate `tx` IDs, malformed rows, the record size limit, quoting, the classification of invalid rows, and exit codes are decided by [ADR-0010](0010-input-validation-and-errors.md) (D5). The output layout and the "nothing on stdout after a failure" rule come from [ADR-0009](0009-output-format.md) (D2), and the locked-account behavior from [ADR-0008](0008-locked-account-policy.md) (D4). The dependency list and lint policy are decided by D7 (LYA-45); this ADR only requires that the domain modules have no dependency.
-* The large-input generator used for these measurements is decided in [ADR-0014](0014-testing-strategy.md) T12.
+* The large-input generator used for these measurements is decided in [ADR-0014](0014-testing-strategy.md) T12. The E7 measurements, including the slowest growth step and the cost of the standard hasher (about 10% of the run time, so S9 stands), are in [docs/performance.md](../performance.md).
 * [ADR-0015](0015-hand-written-input-reader.md) P9 refines S8: an `Account` also keeps `total`, set only by the constructor that checks it, so the account is 64 bytes instead of 48.
 * Revisit this decision if E7 shows that memory or speed is far from the estimates, if inputs must hold more transactions than fit in memory, or when a server is built.
 * Tracked by issue LYA-44 (D6). The crate skeleton (E1), the efficiency measurements (E7), and the README design section (E8) build on this ADR.
