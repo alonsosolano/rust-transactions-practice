@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 72c3c0885a0984584cb70e2d5aa1d4c92ba5341ca85e8d2b1342f3265e81ebf6 # shrinks to opening = {0: Account { available: Balance(-170141183460469231731687303715884105728), held: Balance(0), total: Balance(-170141183460469231731687303715884105728), locked: false }, 1: Account { available: Balance(-170141183460469231731687303715884105728), held: Balance(0), total: Balance(-170141183460469231731687303715884105728), locked: false }}, rows = [Deposit { client: ClientId(0), tx: TxId(0), amount: Amount(18446744073709551615) }]
+cc 12bafd63368d53ac8d9c4ae9290762d62453922a4809b1f1d1ae767ed68560d6 # shrinks to rows = [Deposit { client: ClientId(2), tx: TxId(5), amount: Amount(1) }, Dispute { client: ClientId(2), tx: TxId(5) }, Resolve { client: ClientId(2), tx: TxId(5) }]

@@ -238,7 +238,7 @@ mod tests {
     use crate::account::Account;
     use crate::amount::{Amount, Balance};
     use crate::store::{DisputeState, StoredKind, StoredTx};
-    use crate::test_support::{assert_invariants, snapshot};
+    use crate::test_support::{Checked, amount_of_units, any_row, client_of, row_from, snapshot};
     use crate::transaction::{ClientId, Transaction, TxId};
 
     fn amount(text: &str) -> Amount {
@@ -282,16 +282,11 @@ mod tests {
         }
     }
 
-    /// Applies each row in order, checking the invariants after every step
-    /// (ADR-0013 C4), and returns each row's result.
-    fn run(engine: &mut Engine, rows: &[Transaction]) -> Vec<Result<(), Rejection>> {
-        rows.iter()
-            .map(|&row| {
-                let result = engine.apply(row);
-                assert_invariants(engine);
-                result
-            })
-            .collect()
+    /// Applies each row in order and returns each row's result. `Checked`
+    /// checks every per-row invariant, including the money ledger of I14 and
+    /// I15, after every step (ADR-0013 C4).
+    fn run(engine: &mut Checked, rows: &[Transaction]) -> Vec<Result<(), Rejection>> {
+        rows.iter().map(|&row| engine.apply(row)).collect()
     }
 
     /// `available / held / total / locked` of one client, as in the catalog.
@@ -318,7 +313,7 @@ mod tests {
 
     #[test]
     fn deposits_and_withdrawals_of_interleaved_clients_apply_per_client() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         let results = run(
             &mut engine,
             &[
@@ -336,7 +331,7 @@ mod tests {
 
     #[test]
     fn accounts_iterate_in_ascending_client_order() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(
             &mut engine,
             &[
@@ -352,7 +347,7 @@ mod tests {
 
     #[test]
     fn deposits_and_withdrawals_are_stored_with_their_kind() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(&mut engine, &[deposit(1, 1, "5"), withdrawal(1, 2, "2")]);
         let (_, store) = engine.parts();
         assert_eq!(
@@ -377,7 +372,7 @@ mod tests {
     /// an unseen client (R8) and its bound ID (V6).
     #[test]
     fn i3_a_rejected_withdrawal_opens_a_zero_account_and_binds_its_id() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         let results = run(&mut engine, &[withdrawal(3, 1, "1")]);
         assert_eq!(results, [Err(Rejection::InsufficientFunds)]);
         assert_eq!(state(&engine, 3), row("0.0000", "0.0000", "0.0000", false));
@@ -396,7 +391,7 @@ mod tests {
     /// it was.
     #[test]
     fn i3_a_rejected_withdrawal_leaves_balances_unchanged() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(&mut engine, &[deposit(1, 1, "5")]);
         let (accounts_before, _) = snapshot(&engine);
         let results = run(&mut engine, &[withdrawal(1, 2, "5.0001")]);
@@ -408,7 +403,7 @@ mod tests {
     /// I3: a duplicate changes nothing at all.
     #[test]
     fn i3_a_duplicate_changes_nothing() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(&mut engine, &[deposit(1, 1, "5")]);
         let before = snapshot(&engine);
         let results = run(&mut engine, &[deposit(2, 1, "50"), withdrawal(2, 1, "1")]);
@@ -426,7 +421,7 @@ mod tests {
     /// The owner named by a duplicate is the first row's client.
     #[test]
     fn a_duplicate_names_the_owner_of_the_id() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(&mut engine, &[withdrawal(4, 9, "1")]);
         match engine.apply(deposit(1, 9, "1")) {
             Err(Rejection::DuplicateTx { owner }) => assert_eq!(owner, ClientId(4)),
@@ -438,7 +433,7 @@ mod tests {
     /// tx2 cannot succeed after a deposit.
     #[test]
     fn a29_rejected_withdrawal_binds_its_id() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         let results = run(
             &mut engine,
             &[
@@ -467,7 +462,7 @@ mod tests {
     /// tx2 are both ignored.
     #[test]
     fn a40_applied_withdrawal_binds_its_id() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         let results = run(
             &mut engine,
             &[
@@ -495,7 +490,7 @@ mod tests {
     /// bound ID, and no account for an unseen client.
     #[test]
     fn i6_an_overflowing_deposit_changes_nothing() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         let near_max =
             Account::with_balances(Balance::from_units(i128::MAX), Balance::ZERO, false).unwrap();
         engine.set_account(ClientId(1), near_max);
@@ -509,7 +504,7 @@ mod tests {
     /// Valid input cannot overflow a balance (ADR-0007, Range).
     #[test]
     fn maximum_deposits_do_not_overflow() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         let rows: Vec<Transaction> = (0..1000)
             .map(|tx| Transaction::Deposit {
                 client: ClientId(1),
@@ -528,7 +523,7 @@ mod tests {
     /// stays visible.
     #[test]
     fn a1_withdraw_then_chargeback() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         let results = run(
             &mut engine,
             &[deposit(1, 1, "100"), withdrawal(1, 2, "100"), dispute(1, 1)],
@@ -549,7 +544,7 @@ mod tests {
     /// resolve restores the account.
     #[test]
     fn a2_withdrawal_rejected_while_available_is_negative() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(
             &mut engine,
             &[deposit(1, 1, "100"), withdrawal(1, 2, "100"), dispute(1, 1)],
@@ -569,7 +564,7 @@ mod tests {
     /// A3, ADR-0006 R1: a withdrawal is never disputable.
     #[test]
     fn a3_rows_on_a_withdrawal_are_ignored() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(&mut engine, &[deposit(1, 1, "100"), withdrawal(1, 2, "40")]);
         let results = run(
             &mut engine,
@@ -586,7 +581,7 @@ mod tests {
     /// the ignored row opens no account.
     #[test]
     fn a4_cross_client_dispute_is_ignored() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(&mut engine, &[deposit(1, 1, "10")]);
         assert_eq!(
             run(&mut engine, &[dispute(2, 1)]),
@@ -603,7 +598,7 @@ mod tests {
     /// an open dispute.
     #[test]
     fn a5_cross_client_resolve_and_chargeback_are_ignored() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(&mut engine, &[deposit(1, 1, "10"), dispute(1, 1)]);
         let results = run(&mut engine, &[resolve(2, 1), chargeback(2, 1)]);
         assert_eq!(
@@ -621,7 +616,7 @@ mod tests {
     /// no account.
     #[test]
     fn a6_dispute_on_unknown_tx_opens_no_account() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         assert_eq!(
             run(&mut engine, &[dispute(9, 7)]),
             [Err(Rejection::UnknownTx)]
@@ -632,7 +627,7 @@ mod tests {
     /// A7, ADR-0006 R4: a deposit is never held twice.
     #[test]
     fn a7_second_dispute_is_ignored() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         let results = run(
             &mut engine,
             &[deposit(1, 1, "10"), dispute(1, 1), dispute(1, 1)],
@@ -648,7 +643,7 @@ mod tests {
     /// be charged back.
     #[test]
     fn a8_redispute_after_resolve_opens_a_new_cycle() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         let results = run(
             &mut engine,
             &[
@@ -671,7 +666,7 @@ mod tests {
     /// chargeback applies.
     #[test]
     fn a9_charged_back_is_terminal() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(
             &mut engine,
             &[
@@ -693,7 +688,7 @@ mod tests {
     /// deposit not under dispute are ignored.
     #[test]
     fn a10_rows_without_a_disputable_target_are_ignored() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(&mut engine, &[deposit(1, 1, "5"), withdrawal(1, 2, "10")]);
         let results = run(
             &mut engine,
@@ -720,7 +715,7 @@ mod tests {
     /// and rejects a withdrawal.
     #[test]
     fn a11_locked_account_accepts_deposits_and_rejects_withdrawals() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(
             &mut engine,
             &[
@@ -740,7 +735,7 @@ mod tests {
     /// locked account.
     #[test]
     fn a12_resolve_on_a_locked_account_applies() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         let results = run(
             &mut engine,
             &[
@@ -761,7 +756,7 @@ mod tests {
     /// lock stays and withdrawals stay rejected.
     #[test]
     fn a13_repaying_the_debt_never_unlocks() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(
             &mut engine,
             &[
@@ -780,7 +775,7 @@ mod tests {
     /// records the debt and locks.
     #[test]
     fn a14_redispute_after_withdrawal_records_the_debt() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(
             &mut engine,
             &[
@@ -807,7 +802,7 @@ mod tests {
     /// applies, so the full debt shows.
     #[test]
     fn a23_later_chargebacks_apply_on_a_locked_account() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         let results = run(
             &mut engine,
             &[
@@ -838,7 +833,7 @@ mod tests {
     /// stays disputable; its chargeback leaves the lock in place.
     #[test]
     fn a24_deposit_after_the_lock_is_disputable() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(
             &mut engine,
             &[deposit(1, 1, "10"), dispute(1, 1), chargeback(1, 1)],
@@ -857,7 +852,7 @@ mod tests {
     /// never stored as disputable.
     #[test]
     fn a25_locked_withdrawals_report_the_lock() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(
             &mut engine,
             &[
@@ -891,7 +886,7 @@ mod tests {
     /// the ID, so the other client's dispute is ignored.
     #[test]
     fn a27_duplicate_deposit_cannot_take_over_the_id() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         let results = run(
             &mut engine,
             &[deposit(1, 1, "10"), deposit(2, 1, "50"), dispute(2, 1)],
@@ -915,7 +910,7 @@ mod tests {
     /// charged-back deposit.
     #[test]
     fn a28_repeated_deposit_cannot_reset_a_chargeback() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(
             &mut engine,
             &[deposit(1, 1, "10"), dispute(1, 1), chargeback(1, 1)],
@@ -935,7 +930,7 @@ mod tests {
     /// ignored and the account stays unlocked.
     #[test]
     fn a38_resolve_and_chargeback_after_resolve_are_ignored() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(
             &mut engine,
             &[deposit(1, 1, "10"), dispute(1, 1), resolve(1, 1)],
@@ -956,7 +951,7 @@ mod tests {
     /// exactly `available` is applied.
     #[test]
     fn a39_held_funds_cannot_be_withdrawn() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(
             &mut engine,
             &[deposit(1, 1, "100"), deposit(1, 2, "50"), dispute(1, 1)],
@@ -979,7 +974,7 @@ mod tests {
     /// A41, ADR-0010 V6, ADR-0006 R3: the first row in the file owns the ID.
     #[test]
     fn a41_first_row_owns_the_id() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         let results = run(
             &mut engine,
             &[deposit(2, 1, "50"), deposit(1, 1, "10"), dispute(1, 1)],
@@ -1004,7 +999,7 @@ mod tests {
     /// of a transaction; a rejected withdrawal is unknown to everyone.
     #[test]
     fn a46_ownership_is_checked_before_kind_and_state() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         let results = run(
             &mut engine,
             &[
@@ -1036,7 +1031,7 @@ mod tests {
     /// transaction state unchanged.
     #[test]
     fn i3_an_ignored_dispute_row_changes_nothing() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(
             &mut engine,
             &[deposit(1, 1, "10"), withdrawal(1, 2, "1"), dispute(1, 1)],
@@ -1060,7 +1055,7 @@ mod tests {
     /// leaves the deposit's state unchanged.
     #[test]
     fn i6_an_overflowing_dispute_changes_nothing() {
-        let mut engine = Engine::new();
+        let mut engine = Checked::new();
         run(&mut engine, &[deposit(1, 1, "1")]);
         let floor =
             Account::with_balances(Balance::from_units(i128::MIN), Balance::ZERO, false).unwrap();
@@ -1070,65 +1065,157 @@ mod tests {
         assert_eq!(snapshot(&engine), before);
     }
 
-    /// One generated row of any of the five types over small pools of
-    /// clients, IDs, and amounts, so duplicates, refusals, cross-client
-    /// references, and every dispute transition are common (ADR-0014 T11).
-    fn any_row() -> impl Strategy<Value = Transaction> {
-        (0_u8..5, 0_u16..4, 0_u32..24, 1_u64..=50_000).prop_map(|(kind, client, tx, units)| {
-            let text = format!("{}.{:04}", units / 10_000, units % 10_000);
-            let amount = Amount::parse(text.as_bytes()).unwrap();
-            let (client, tx) = (ClientId(client), TxId(tx));
-            match kind {
-                0 => Transaction::Deposit { client, tx, amount },
-                1 => Transaction::Withdrawal { client, tx, amount },
-                2 => Transaction::Dispute { client, tx },
-                3 => Transaction::Resolve { client, tx },
-                _ => Transaction::Chargeback { client, tx },
-            }
+    /// Balance units near either end of the `i128` range, or small.
+    fn extreme_units() -> impl Strategy<Value = i128> {
+        let offset = prop_oneof![0_u64..=50_000, any::<u64>()];
+        prop_oneof![
+            offset
+                .clone()
+                .prop_map(|k| i128::MAX.checked_sub(i128::from(k)).unwrap()),
+            offset
+                .clone()
+                .prop_map(|k| i128::MIN.checked_add(i128::from(k)).unwrap()),
+            offset.prop_map(i128::from),
+        ]
+    }
+
+    /// An opening account with `available` near the end of the range. `held`
+    /// is zero, because I4 ties it to the disputed deposits, and there are
+    /// none yet.
+    fn extreme_account() -> impl Strategy<Value = Account> {
+        (extreme_units(), any::<bool>()).prop_map(|(units, locked)| {
+            Account::with_balances(Balance::from_units(units), Balance::ZERO, locked).unwrap()
         })
     }
 
+    /// Amounts from one unit to the maximum, so that the sum of a seeded
+    /// balance and an amount often leaves the `i128` range.
+    fn wide_amount() -> impl Strategy<Value = Amount> {
+        prop_oneof![
+            Just(Amount::MAX),
+            (1_u64..=50_000).prop_map(amount_of_units),
+            (1_u64..=u64::MAX).prop_map(amount_of_units),
+        ]
+    }
+
+    /// Row types weighted toward disputes, resolves, and chargebacks over a
+    /// handful of IDs, so most deposits go through several dispute cycles
+    /// and many accounts get locked.
+    fn dispute_heavy_row() -> impl Strategy<Value = Transaction> {
+        let kind = prop_oneof![
+            1 => Just(0_u8),
+            1 => Just(1_u8),
+            3 => Just(2_u8),
+            2 => Just(3_u8),
+            2 => Just(4_u8),
+        ];
+        row_from(
+            kind,
+            0_u16..2,
+            0_u32..6,
+            (1_u64..=50_000).prop_map(amount_of_units),
+        )
+    }
+
     proptest! {
-        /// I1, I2, and I3 over random streams of all five row types.
+        /// Every per-row invariant that `Checked` verifies, over random
+        /// streams of all five row types.
         ///
-        /// Covers: I1, I2, I3, I4, I11, I13.
+        /// Covers: I1, I2, I3, I4, I5, I8, I11, I13, I14, I15, I16.
         #[test]
-        fn i1_i2_i3_hold_after_every_row(rows in prop::collection::vec(any_row(), 0..64)) {
-            let mut engine = Engine::new();
+        fn state_invariants_hold_after_every_row(rows in prop::collection::vec(any_row(), 0..64)) {
+            let mut engine = Checked::new();
             for row in rows {
-                let (accounts_before, store_before) = snapshot(&engine);
-                let result = engine.apply(row);
-                assert_invariants(&engine);
-                let (accounts_after, store_after) = snapshot(&engine);
-                // I2: no account goes from locked back to unlocked.
-                for (client, before) in &accounts_before {
-                    if before.is_locked() {
-                        prop_assert!(accounts_after.get(client).is_some_and(Account::is_locked));
-                    }
+                let _ = engine.apply(row);
+            }
+        }
+
+        /// I4 on its own: `held` equals the sum of the client's disputed
+        /// deposits, on streams where most rows are dispute-related, so
+        /// deposits are disputed, resolved, disputed again, and charged back.
+        /// The same streams lock most accounts, which exercises I8 (no
+        /// withdrawal on a locked account) and I16 (legal moves only).
+        ///
+        /// Covers: I4, I8, I16.
+        #[test]
+        fn i4_held_equals_disputed_deposits(rows in prop::collection::vec(dispute_heavy_row(), 0..64)) {
+            let mut engine = Checked::new();
+            for row in rows {
+                let _ = engine.apply(row);
+            }
+        }
+
+        /// I9: a deposit, dispute, resolve, or chargeback has the same effect
+        /// on balances and transaction states whether or not the account is
+        /// locked. Before each such row, a second engine replays the same
+        /// rows and then flips the lock of the row's client; the row must
+        /// give both engines the same result and the same balances and
+        /// store, and leave every other account identical.
+        ///
+        /// Covers: I9.
+        #[test]
+        fn i9_the_lock_does_not_change_other_rows(rows in prop::collection::vec(any_row(), 1..48)) {
+            for (index, &row) in rows.iter().enumerate() {
+                if matches!(row, Transaction::Withdrawal { .. }) {
+                    continue;
                 }
-                match (result, row) {
-                    (Ok(()), _) => {}
-                    (
-                        Err(Rejection::InsufficientFunds | Rejection::AccountLocked),
-                        Transaction::Withdrawal { client, tx, .. },
-                    ) => {
-                        // Exactly two effects: a zero account for an unseen
-                        // client and the bound ID.
-                        let mut expected = accounts_before.clone();
-                        expected.entry(client).or_insert_with(Account::default);
-                        prop_assert_eq!(&accounts_after, &expected);
-                        prop_assert!(!store_before.contains_key(&tx));
-                        prop_assert_eq!(Some(store_after.len()), store_before.len().checked_add(1));
-                        prop_assert_eq!(
-                            store_after.get(&tx).map(|(owner, _)| *owner),
-                            Some(client)
-                        );
-                    }
-                    (Err(_), _) => {
-                        prop_assert_eq!(&accounts_after, &accounts_before);
-                        prop_assert_eq!(&store_after, &store_before);
-                    }
+                let client = client_of(row);
+                let earlier = &rows[..index];
+                let mut original = Engine::new();
+                let mut flipped = Engine::new();
+                for &earlier_row in earlier {
+                    let _ = original.apply(earlier_row);
+                    let _ = flipped.apply(earlier_row);
                 }
+                let Some(account) = original.parts().0.get(&client).copied() else {
+                    continue;
+                };
+                let toggled =
+                    Account::with_balances(account.available(), account.held(), !account.is_locked())
+                        .unwrap();
+                flipped.set_account(client, toggled);
+
+                let result = original.apply(row);
+                prop_assert_eq!(flipped.apply(row), result);
+                let (mut accounts, store) = snapshot(&original);
+                let (mut flipped_accounts, flipped_store) = snapshot(&flipped);
+                prop_assert_eq!(store, flipped_store);
+                let mine = accounts.remove(&client).unwrap();
+                let theirs = flipped_accounts.remove(&client).unwrap();
+                prop_assert_eq!(accounts, flipped_accounts);
+                prop_assert_eq!(
+                    (mine.available(), mine.held(), mine.total()),
+                    (theirs.available(), theirs.held(), theirs.total())
+                );
+                // The flipped lock stays flipped, unless the row is an
+                // applied chargeback, which locks both.
+                let charged_back = result.is_ok() && matches!(row, Transaction::Chargeback { .. });
+                prop_assert_eq!(theirs.is_locked(), charged_back || !account.is_locked());
+            }
+        }
+
+        /// I6: accounts open with `available` near either end of the `i128`
+        /// range, and amounts go up to the maximum, so deposits often would
+        /// overflow. Every such row is refused with no effect (I3, checked by
+        /// `Checked`), and every applied row keeps the totals equal to the
+        /// checked ledger (I14, I15), so no balance ever wraps. With `held`
+        /// at zero, as I4 requires of an account with no disputed deposit,
+        /// only a deposit can overflow: `available + amount` of a resolve is
+        /// at most `total`. The other rows' overflows need a seeded `held`
+        /// and are covered by the `i6_` unit tests in `account` and `engine`.
+        ///
+        /// Covers: I6.
+        #[test]
+        fn i6_overflow_is_refused_and_changes_nothing(
+            opening in prop::collection::btree_map(0_u16..3, extreme_account(), 0..=3),
+            rows in prop::collection::vec(row_from(0_u8..5, 0_u16..3, 0_u32..12, wide_amount()), 0..48),
+        ) {
+            let mut engine = Checked::new();
+            for (client, account) in opening {
+                engine.set_account(ClientId(client), account);
+            }
+            for row in rows {
+                let _ = engine.apply(row);
             }
         }
     }

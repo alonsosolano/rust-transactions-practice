@@ -148,6 +148,13 @@ impl Balance {
     pub(crate) const fn from_units(units: i128) -> Self {
         Self(units)
     }
+
+    /// The balance in units of `0.0001`, for tests that sum balances beyond
+    /// the `i128` range (the ledger of ADR-0013 C5).
+    #[cfg(test)]
+    pub(crate) const fn units(self) -> i128 {
+        self.0
+    }
 }
 
 impl From<Amount> for Balance {
