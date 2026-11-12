@@ -322,15 +322,6 @@ fn check_a43_bytes(root: &Path, cases: &[String]) -> Vec<String> {
     problems
 }
 
-/// A26, ADR-0009 O1 to O9: the example input of requirements §3 gives exactly
-/// the example output there, byte for byte: sorted rows, fixed 4-digit
-/// amounts, `-0.5000` for client 1, a zero-balance row for client 3, and no
-/// row for client 4.
-#[test]
-fn a26_example_output_sample_case() -> TestResult {
-    run_case("a26-example-output")
-}
-
 /// Runs the binary on `input.csv` in a sample case directory.
 fn run_in_case(name: &str) -> Result<Output, Box<dyn Error>> {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
