@@ -218,4 +218,5 @@ Reason codes are named here for clarity; the code may spell them differently as 
 * Answers the open questions on malformed rows and duplicate `tx` IDs in [requirements §10](../requirements.md). Dependencies (`csv`, `thiserror`) and lint policy are decided by D7 (LYA-45); the attack catalog by D8 (LYA-46); the CLI entry point is built in E1 (LYA-49).
 * Revisit if an upstream needs case-insensitive types or partial disputes (the amount on dispute-related rows would then need a meaning and validation), if an error budget becomes necessary, if an upstream needs multi-line quoted fields, or if the CLI ever gains optional flags.
 * The six reason codes for dispute-related rows and the order in which they are checked are set by [ADR-0016](0016-dispute-row-reasons-and-check-order.md).
+* The exact text of each diagnostic line and of the summary, and the rule that the summary comes before a fatal line, are set by [ADR-0017](0017-diagnostic-line-format-and-summary.md); V11 is unchanged.
 * Tracked by issue LYA-43 (D5).

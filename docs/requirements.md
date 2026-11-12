@@ -18,7 +18,7 @@ cargo run -- transactions.csv > accounts.csv
 
 ### Exit codes
 
-Follow [ADR-0010](decisions/0010-input-validation-and-errors.md) V10. A fatal error writes one line to stderr and leaves stdout empty (a failed stdout write may leave partial output).
+Follow [ADR-0010](decisions/0010-input-validation-and-errors.md) V10. A fatal error writes one line to stderr and leaves stdout empty (a failed stdout write may leave partial output). When the error happens after the input was opened, the diagnostics summary comes first and the fatal line is the last line ([ADR-0017](decisions/0017-diagnostic-line-format-and-summary.md) D7).
 
 | Code | Meaning |
 |------|---------|
@@ -160,7 +160,7 @@ These are treated as upstream errors and skipped without failing the run. "Skipp
 
 When a `dispute`, `resolve`, or `chargeback` row breaks several of these rules, the checks run in a fixed order and the first that fails is the reason: the `tx` is stored, then the row's client owns it, then it is a deposit, then its state accepts the row. Each rule has its own reason code ([ADR-0016](decisions/0016-dispute-row-reasons-and-check-order.md) G1, G2).
 
-Diagnostics escape any echoed input, so every entry is exactly one line ([ADR-0010](decisions/0010-input-validation-and-errors.md) V11).
+Diagnostics escape any echoed input, so every entry is exactly one line ([ADR-0010](decisions/0010-input-validation-and-errors.md) V11). The exact line format, the notice, and the summary, which every run that opens its input writes, are set by [ADR-0017](decisions/0017-diagnostic-line-format-and-summary.md).
 
 Only a `deposit` or `withdrawal` row creates a client account, including a rejected withdrawal. Ignored rows never do.
 
