@@ -9,6 +9,13 @@
 //! `input`, `output`, and `diagnostics` read or write (ADR-0011 S2).
 
 mod account;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the engine (E3) is the first user of Amount and Balance; remove this then"
+    )
+)]
 mod amount;
 mod diagnostics;
 mod engine;
