@@ -14,6 +14,7 @@ cargo run -- transactions.csv > accounts.csv
 
 - [docs/requirements.md](docs/requirements.md): behavior contract.
 - [docs/decisions/](docs/decisions/): architecture decision records.
+- [docs/performance.md](docs/performance.md): time and memory measured on inputs of up to 100 million rows.
 - [CONTRIBUTING.md](CONTRIBUTING.md): setup, commit, branch, and PR conventions.
 - [AGENTS.md](AGENTS.md): instructions for AI coding agents.
 
