@@ -164,6 +164,7 @@ client,available,held,total,locked
   * The [Rust `HashMap` documentation](https://doc.rust-lang.org/std/collections/struct.HashMap.html): the hasher is randomly seeded and iteration order is arbitrary.
   * [ISO 4217](https://www.iso.org/iso-4217-currency-codes.html) on the fixed number of minor-unit digits per currency.
 * Whether the writer uses the `csv` crate or plain formatted writes is an implementation detail under the dependency decision (D7). Either way, the output must follow O1 to O10.
+* The sample-case layout and byte-for-byte comparison are decided in [ADR-0014](0014-testing-strategy.md).
 * Revisit this decision if the checker turns out to require a different layout, or if the output gains columns. Both would need a superseding ADR, and the second would also change the CLI contract.
 * [ADR-0011](0011-architecture-and-memory.md) keeps accounts ordered by client, so O3 needs no sort step, and calls the output writer once after the input loop, which delivers O10.
 * Answers the output-format details of issue LYA-40 (D2). Account creation comes from [ADR-0006](0006-dispute-lifecycle.md) (D3), the output of locked accounts from [ADR-0008](0008-locked-account-policy.md) L6 (D4), exact formatting and negative values from [ADR-0007](0007-money-representation.md) (D1), and fatal errors and exit codes from D5 (LYA-43), decided in [ADR-0010](0010-input-validation-and-errors.md). The output writer (E3) builds on these rules.

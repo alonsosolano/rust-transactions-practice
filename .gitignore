@@ -11,3 +11,6 @@
 .DS_Store
 .idea/
 .vscode/
+
+# cargo-mutants output (ADR-0014, rule T13).
+/mutants.out*

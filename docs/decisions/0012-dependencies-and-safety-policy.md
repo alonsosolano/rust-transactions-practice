@@ -235,5 +235,6 @@ The lints are `deny` rather than `warn`, so a plain `cargo clippy` already fails
   * [`csv` crate tutorial](https://docs.rs/csv/latest/csv/tutorial/index.html) on decoding with serde.
 * Coordination: D5 (LYA-43) decides which errors exist, how each is classified, and its exit code; this ADR only decides that the error enums use `thiserror` and that `main` maps them to an `ExitCode` without `anyhow`. Revisit S1 if D5 needs something `thiserror` cannot express.
 * Settles the open question in [ADR-0007](0007-money-representation.md) on where its numeric lints apply: crate-wide, outside tests (S7).
+* How CLI and property tests are laid out and run is decided in [ADR-0014](0014-testing-strategy.md).
 * Revisit this decision if a dependency gets a RustSec advisory or loses its maintainer, if E1 to E-n find a lint that blocks reasonable code without a safety benefit, or if a newer `rust-version` is needed.
 * Tracked by issue LYA-45 (D7). The crate skeleton (E1, LYA-49) applies the configuration above.

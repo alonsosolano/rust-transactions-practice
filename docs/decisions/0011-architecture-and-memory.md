@@ -351,5 +351,6 @@ flowchart LR
   * TigerBeetle's [performance notes](https://docs.tigerbeetle.com/concepts/performance/): single-threaded by design, because hot accounts make sharding a financial database hard.
   * The [`LinesCodec` documentation](https://docs.rs/tokio-util/latest/tokio_util/codec/struct.LinesCodec.html), which recommends a maximum line length for any codec exposed to untrusted input.
 * Related decisions: duplicate `tx` IDs, malformed rows, the record size limit, quoting, the classification of invalid rows, and exit codes are decided by [ADR-0010](0010-input-validation-and-errors.md) (D5). The output layout and the "nothing on stdout after a failure" rule come from [ADR-0009](0009-output-format.md) (D2), and the locked-account behavior from [ADR-0008](0008-locked-account-policy.md) (D4). The dependency list and lint policy are decided by D7 (LYA-45); this ADR only requires that the domain modules have no dependency.
+* The large-input generator used for these measurements is decided in [ADR-0014](0014-testing-strategy.md) T12.
 * Revisit this decision if E7 shows that memory or speed is far from the estimates, if inputs must hold more transactions than fit in memory, or when a server is built.
 * Tracked by issue LYA-44 (D6). The crate skeleton (E1), the efficiency measurements (E7), and the README design section (E8) build on this ADR.

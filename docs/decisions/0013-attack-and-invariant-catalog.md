@@ -116,4 +116,5 @@ Everything else in an account depends only on that client's rows: balances, the 
   * Test layers: the Rust Book chapter on [test organization](https://doc.rust-lang.org/book/ch11-03-test-organization.html) (unit tests next to the code, integration tests that use the public API).
   * Risk-based prioritization: the [ISTQB Foundation Level syllabus](https://www.istqb.org/certifications/certified-tester-foundation-level/) on risk-based testing.
 * Adds scenarios A38 to A45 and invariants I13 to I18, and the Test and Priority columns, to [requirements §6](../requirements.md). No earlier rule changes.
+* Where each test type lives, how sample cases are laid out, and how tests are named after catalog IDs are decided in [ADR-0014](0014-testing-strategy.md).
 * Tracked by issue LYA-46 (D8). The testing strategy (D9) places each test type; the tests themselves are written in E6.
